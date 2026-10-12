@@ -118,6 +118,29 @@ class JudgeVerdict(BaseModel):
         return out
 
 
+class VerifyDraft(BaseModel):
+    """A fact-check of one finding against the RFC (validated LLM output)."""
+
+    verdict: str = "valid"  # valid | already_addressed | contradicted
+    evidence: str | None = None
+    reason: str | None = None
+
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _verdict(cls, v: Any) -> str:
+        v = str(v).strip().lower().replace(" ", "_").replace("-", "_")
+        if v in ("already_addressed", "addressed", "covered", "already_covered"):
+            return "already_addressed"
+        if v in ("contradicted", "contradicts", "false", "wrong", "incorrect"):
+            return "contradicted"
+        return "valid"  # anything unclear keeps the finding
+
+    @field_validator("evidence", "reason", mode="before")
+    @classmethod
+    def _text(cls, v: Any) -> Any:
+        return _to_text(v)
+
+
 # ------------------------------------------------------------------ API schemas
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)

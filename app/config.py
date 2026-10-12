@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     ollama_think: bool = False
     ollama_num_ctx: int = 8192
     llm_max_retries: int = 2
+    # Cloud providers answer "429 Too Many Requests" when a free plan's per-minute limit is hit.
+    # The client then waits (using the provider's Retry-After when given) and tries again.
+    llm_rate_limit_retries: int = 6
+    llm_rate_limit_max_wait: float = 60.0  # seconds; a longer wait (e.g. a daily limit) is not waited out
 
     secret_key: str = "change-me"
     token_expire_minutes: int = 60 * 24 * 7
@@ -27,6 +31,8 @@ class Settings(BaseSettings):
     debate_rounds: int = 1
     max_rfc_chars_in_prompt: int = 12000
     max_specialist_concurrency: int = 5
+    # Second pass that drops findings the RFC already addresses or contradicts.
+    verify_findings: bool = True
 
 
 @lru_cache

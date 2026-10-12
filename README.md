@@ -108,3 +108,14 @@ After pulling this change:
 Projects created before accounts existed stay in the database but belong to nobody, so no one can see them.
 
 API use: `POST /auth/register` or `POST /auth/login`, then send `Authorization: Bearer <access_token>` on every other call.
+
+## Evidence check
+
+After the specialists write their findings, a second pass checks each one against the RFC. A finding is removed when the RFC already contains the safeguard it says is missing, or states the opposite of what the finding claims. The verifier must copy the proving sentence word for word from the RFC, and if it cannot, or if the call fails, the finding is kept. The final summary says how many findings were removed. Removed findings never reach the debate, the score caps or the report.
+
+- Turn it off with `VERIFY_FINDINGS=false` in `.env`.
+- It adds one short model call per finding. With a local model that adds a few minutes, with a cloud model a few seconds.
+- To see how well your model does this job, run `python scripts/check_verifier.py`. A good model scores 6/6. A tiny model (for example `qwen3:1.7b`) may not. If the model does not answer (for example a rate limit), the script reports those cases as errors instead of counting them as passes.
+- **Rate limits.** Free cloud plans (Groq, for example) answer "429 Too Many Requests" when too many calls arrive in a minute. The app waits for the time the provider asks for (or backs off 5, 10, 20 ... seconds) and tries again, up to `LLM_RATE_LIMIT_RETRIES` times (default 6). A wait longer than `LLM_RATE_LIMIT_MAX_WAIT` seconds (default 60) usually means a daily limit, so the call fails at once with a clear message. If it keeps happening, set `MAX_SPECIALIST_CONCURRENCY=1`.
+- If a finding could not be checked because the model did not answer, it is kept and the report summary says "Evidence check incomplete: N findings could not be checked". Run the review again once the limit has reset.
+- Cloud error messages now include what the provider said, so a retired model name shows up as "model does not exist" instead of a bare 404.

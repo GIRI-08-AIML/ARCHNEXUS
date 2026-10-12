@@ -17,6 +17,8 @@ from app.agents.base import (
     run_analysis,
     run_debate,
     run_judge,
+    run_verification,
+    text_in_rfc,
 )
 from app.config import Settings, get_settings
 from app.llm import LLMClient, LLMError
@@ -58,6 +60,8 @@ class ReviewOrchestrator:
         self.db = db
         self.llm = llm
         self.settings = settings or get_settings()
+        self.removed_by_verifier: list[dict] = []  # findings the RFC already addresses or contradicts
+        self.unverified: list[str] = []  # titles of findings the verifier could not check (model call failed)
 
     # ------------------------------------------------------------------ public
     def run(self, review_id: int) -> Review:
@@ -109,45 +113,76 @@ class ReviewOrchestrator:
         transcript = self._debate_rounds(review, agents, findings)
         self._judge(review, project.name, agents, findings, transcript)
 
+    def _verify_finding(self, project_name: str, rfc_text: str, d) -> str | None:
+        """Return a reason if the RFC already addresses or contradicts the finding, else None.
+
+        Any doubt keeps the finding: a failed call, an unclear answer, or evidence that is
+        not found word for word in the RFC all mean "keep".
+        """
+        try:
+            result = run_verification(
+                self.llm,
+                project_name,
+                rfc_text,
+                {"title": d.title, "description": d.description, "recommendation": d.recommendation},
+                self.settings.max_rfc_chars_in_prompt,
+            )
+        except Exception as exc:  # noqa: BLE001 - LLMError or invalid JSON
+            logger.warning("Verification of '%s' failed (%s); keeping the finding", d.title, exc)
+            self.unverified.append(d.title)  # list.append is safe from the worker threads
+            return None
+        if result.verdict == "valid":
+            return None
+        if not text_in_rfc(result.evidence, rfc_text, min_len=15):
+            logger.info("Verifier evidence for '%s' not found in the RFC; keeping the finding", d.title)
+            return None
+        return f"{result.verdict.replace('_', ' ')}: {result.evidence}"
+
     def _analysis_round(self, review, project_name, parsed, agents) -> dict[str, list[dict]]:
         import concurrent.futures
 
         collected: dict[str, list[dict]] = {}
         failures: list[str] = []
-        rfc_full_text = (review.rfc_text or "").lower()
+        rfc_text = review.rfc_text or ""
 
         def analyze_spec(spec):
+            """Runs in a worker thread. Only LLM calls happen here; all database writes stay in the main thread."""
             try:
                 res = run_analysis(
                     spec, self.llm, project_name, parsed, self.settings.max_rfc_chars_in_prompt
                 )
-                return spec.name, res, None
             except LLMError as exc:
-                return spec.name, [], exc
+                return spec.name, [], [], exc
+            kept, removed = [], []
+            for d in res:
+                is_valid = text_in_rfc(d.quote, rfc_text)
+                # Hallucination guard: the quote must exist in the RFC.
+                if not is_valid and rfc_text:
+                    logger.info("Discarding finding '%s' from %s: quote not found in RFC", d.title, spec.name)
+                    continue
+                # Fact check: drop findings the RFC already addresses or contradicts.
+                if self.settings.verify_findings and rfc_text:
+                    reason = self._verify_finding(project_name, rfc_text, d)
+                    if reason:
+                        logger.info("Dropping finding '%s' from %s: %s", d.title, spec.name, reason)
+                        removed.append({"agent": spec.name, "title": d.title, "reason": reason})
+                        continue
+                kept.append((d, is_valid))
+            return spec.name, kept, removed, None
 
         max_workers = min(len(SPECIALISTS), max(1, self.settings.max_specialist_concurrency))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(analyze_spec, spec) for spec in SPECIALISTS]
             for future in concurrent.futures.as_completed(futures):
-                name, drafts, err = future.result()
+                name, kept, removed, err = future.result()
                 if err:
                     logger.warning("%s failed: %s", name, err)
                     failures.append(name)
                     continue
+                self.removed_by_verifier.extend(removed)
 
                 spec_findings = []
-                for d in drafts:
-                    q = (d.quote or "").strip()
-                    # Validate quote presence in RFC: must have a quote and it must exist in RFC (case-insensitive)
-                    q_clean = " ".join(q.split()).lower()
-                    rfc_clean = " ".join(rfc_full_text.split())
-                    is_valid = bool(q_clean and q_clean in rfc_clean)
-
-                    # Only keep findings that have a valid RFC quote (hallucination guard)
-                    if not is_valid and rfc_full_text:
-                        logger.info("Discarding finding '%s' from %s: quote not found in RFC", d.title, name)
-                        continue
-
+                for d, is_valid in kept:
                     self.db.add(
                         Finding(
                             review_id=review.id,
@@ -177,7 +212,14 @@ class ReviewOrchestrator:
                     self.db.commit()
 
         if not collected:
-            raise RuntimeError(f"All specialist agents failed: {', '.join(failures)}")
+            if len(failures) == len(SPECIALISTS):
+                raise RuntimeError(f"All specialist agents failed: {', '.join(failures)}")
+            if not self.removed_by_verifier:
+                # Empty because the model produced nothing usable, not because the RFC answered everything.
+                raise RuntimeError(
+                    "The agents returned no usable findings. Try a larger model or run the review again."
+                )
+            # Every finding was answered by the RFC itself: a strong RFC. Carry on to the verdict.
         return collected
 
     def _debate_rounds(self, review, agents, findings) -> list[dict]:
@@ -230,6 +272,21 @@ class ReviewOrchestrator:
             verdict = heuristic_verdict(findings)
 
         verdict = apply_guardrails(verdict, findings)
+        notes = []
+        if self.removed_by_verifier:
+            n = len(self.removed_by_verifier)
+            notes.append(
+                f"Evidence check: {n} finding{'s' if n != 1 else ''} removed because the RFC already "
+                f"addresses or contradicts {'them' if n != 1 else 'it'}."
+            )
+        if self.unverified:
+            n = len(self.unverified)
+            notes.append(
+                f"Evidence check incomplete: {n} finding{'s' if n != 1 else ''} could not be checked "
+                f"because the model did not respond, so {'they were' if n != 1 else 'it was'} kept."
+            )
+        if notes:
+            verdict = verdict.model_copy(update={"summary": f"{verdict.summary} {' '.join(notes)}"})
 
         self.db.add(
             FinalReport(

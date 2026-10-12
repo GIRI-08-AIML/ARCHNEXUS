@@ -37,9 +37,13 @@ One orders table with a JSON column for line items. No indexes beyond the primar
 class FakeLLM:
     """Deterministic stand-in for Ollama. Dispatches on the TASK marker in the prompt."""
 
-    def __init__(self, fail_judge: bool = False, fail_all: bool = False):
+    def __init__(self, fail_judge: bool = False, fail_all: bool = False, verify_rules: dict | None = None,
+                 fail_verify: bool = False):
         self.fail_judge = fail_judge
         self.fail_all = fail_all
+        self.fail_verify = fail_verify
+        # finding title -> verifier answer; any finding not listed is judged valid
+        self.verify_rules = verify_rules or {}
         self.calls: list[str] = []
 
     def chat_json(self, messages):
@@ -64,6 +68,13 @@ class FakeLLM:
                     {"title": "missing fields"},  # malformed -> skipped
                 ]
             }
+        if task.startswith("TASK: VERIFY"):
+            if self.fail_verify:
+                raise LLMError("verifier down")
+            for title, answer in self.verify_rules.items():
+                if f"Finding title: {title}\n" in user:
+                    return answer
+            return {"verdict": "valid", "evidence": "", "reason": "ok"}
         if task.startswith("TASK: DEBATE"):
             who = messages[0]["content"].split(" on a software")[0].replace("You are the ", "")
             target = "Security Agent" if who != "Security Agent" else "Database Agent"

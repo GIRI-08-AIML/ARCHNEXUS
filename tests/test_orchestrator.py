@@ -96,3 +96,94 @@ def test_all_agents_failing_marks_review_failed(db):
     review = ReviewOrchestrator(db, FakeLLM(fail_all=True)).run(review_id)
     assert review.status == "failed"
     assert "All specialist agents failed" in review.error
+
+
+# ------------------------------------------------------------ evidence check (verifier)
+def _findings(db, review_id):
+    return db.scalars(select(Finding).where(Finding.review_id == review_id)).all()
+
+
+def test_verifier_drops_findings_the_rfc_contradicts(db):
+    rules = {
+        "Database Agent finding": {
+            "verdict": "contradicted",
+            "evidence": "Orders must never be lost.",
+            "reason": "The RFC already says so.",
+        }
+    }
+    review_id = _make_review(db)
+    llm = FakeLLM(verify_rules=rules)
+    review = ReviewOrchestrator(db, llm).run(review_id)
+
+    assert review.status == "completed"
+    titles = {f.title for f in _findings(db, review_id)}
+    assert "Database Agent finding" not in titles
+    assert len(titles) == 4  # the other four specialists keep theirs
+    assert llm.calls.count("TASK: VERIFY") == 5  # one check per finding
+    report = db.scalar(select(FinalReport))
+    assert "Evidence check: 1 finding removed" in report.summary
+
+
+def test_verifier_evidence_must_exist_in_the_rfc(db):
+    """If the verifier invents its evidence, the finding is kept."""
+    rules = {
+        "Database Agent finding": {
+            "verdict": "already_addressed",
+            "evidence": "We use sharded databases with automatic failover everywhere.",
+            "reason": "made up",
+        }
+    }
+    review_id = _make_review(db)
+    ReviewOrchestrator(db, FakeLLM(verify_rules=rules)).run(review_id)
+    assert "Database Agent finding" in {f.title for f in _findings(db, review_id)}
+    assert "Evidence check" not in db.scalar(select(FinalReport)).summary
+
+
+def test_verifier_failure_keeps_every_finding(db):
+    review_id = _make_review(db)
+    review = ReviewOrchestrator(db, FakeLLM(fail_verify=True)).run(review_id)
+    assert review.status == "completed"
+    assert len(_findings(db, review_id)) == 5
+    # The report must say the check did not run, so nobody mistakes "kept" for "verified".
+    summary = db.scalar(select(FinalReport)).summary
+    assert "Evidence check incomplete: 5 findings could not be checked" in summary
+    assert "removed" not in summary
+
+
+def test_verifier_can_be_switched_off(db):
+    from app.config import Settings
+
+    review_id = _make_review(db)
+    llm = FakeLLM(verify_rules={"Database Agent finding": {
+        "verdict": "contradicted", "evidence": "Orders must never be lost.", "reason": "x"}})
+    ReviewOrchestrator(db, llm, Settings(verify_findings=False)).run(review_id)
+    assert "TASK: VERIFY" not in llm.calls
+    assert len(_findings(db, review_id)) == 5
+
+
+def test_review_completes_when_the_rfc_answers_every_finding(db):
+    """A strong RFC: every finding is removed, and the review still finishes."""
+    answer = {"verdict": "contradicted", "evidence": "Orders must never be lost.", "reason": "covered"}
+    names = ["Architecture", "Security", "Database", "Scalability", "Reliability"]
+    rules = {f"{n} Agent finding": answer for n in names}
+    review_id = _make_review(db)
+    review = ReviewOrchestrator(db, FakeLLM(verify_rules=rules)).run(review_id)
+    assert review.status == "completed"
+    assert _findings(db, review_id) == []
+    report = db.scalar(select(FinalReport))
+    assert "0 critical, 0 high" in report.summary
+    assert "5 findings removed" in report.summary
+
+
+def test_no_usable_findings_is_a_failure_not_an_approval(db):
+    """If the model returns nothing usable (and nothing was removed by the verifier), do not approve."""
+    class EmptyLLM(FakeLLM):
+        def chat_json(self, messages):
+            if messages[-1]["content"].startswith("TASK: ANALYSIS"):
+                return {"findings": []}
+            return super().chat_json(messages)
+
+    review_id = _make_review(db)
+    review = ReviewOrchestrator(db, EmptyLLM()).run(review_id)
+    assert review.status == "failed"
+    assert "no usable findings" in review.error

@@ -1,9 +1,15 @@
 """Export review reports to Markdown and PDF formats."""
 import io
+from xml.sax.saxutils import escape as _esc
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib import colors
+
+
+def _x(value) -> str:
+    """Escape model-written text so characters like < and & cannot break the PDF layout."""
+    return _esc(str(value if value is not None else ""))
 
 
 def export_review_markdown(review) -> str:
@@ -55,6 +61,8 @@ def export_review_markdown(review) -> str:
             if getattr(f, "status_reason", None):
                 lines.append(f"**Status Reason:** _{f.status_reason}_  ")
             lines.append("")
+            if getattr(f, "quote", None):
+                lines.append(f"> RFC says: \"{f.quote}\"\n")
             lines.append(f"**Problem:**  \n{f.description}\n")
             lines.append(f"**Recommendation:**  \n{f.recommendation}\n")
             if f.tradeoffs:
@@ -110,7 +118,7 @@ def export_review_pdf(review) -> bytes:
     elements = []
 
     proj_name = review.project.name if review.project else f"Project {review.project_id}"
-    elements.append(Paragraph(f"ArchNexus Review: {proj_name}", title_style))
+    elements.append(Paragraph(f"ArchNexus Review: {_x(proj_name)}", title_style))
     elements.append(Spacer(1, 6))
 
     meta_text = f"Review #{review.id} | Date: {review.created_at.strftime('%Y-%m-%d %H:%M UTC')}"
@@ -137,19 +145,19 @@ def export_review_pdf(review) -> bytes:
         elements.append(score_table)
         elements.append(Spacer(1, 10))
 
-        elements.append(Paragraph("<b>Summary:</b> " + (report.summary or ""), body_style))
+        elements.append(Paragraph("<b>Summary:</b> " + _x(report.summary), body_style))
         elements.append(Spacer(1, 10))
 
         if report.key_risks:
             elements.append(Paragraph("Key Risks", h2_style))
             for r in report.key_risks:
-                elements.append(Paragraph("• " + str(r), body_style))
+                elements.append(Paragraph("• " + _x(r), body_style))
             elements.append(Spacer(1, 8))
 
         if report.recommendations:
             elements.append(Paragraph("Recommendations", h2_style))
             for i, rec in enumerate(report.recommendations, 1):
-                elements.append(Paragraph(f"{i}. {rec}", body_style))
+                elements.append(Paragraph(f"{i}. {_x(rec)}", body_style))
             elements.append(Spacer(1, 8))
 
     findings = getattr(review, "findings", [])
@@ -159,14 +167,16 @@ def export_review_pdf(review) -> bytes:
     for f in findings:
         status_str = f" [{f.status.upper()}]" if getattr(f, "status", None) else ""
         elements.append(
-            Paragraph(f"<b>{f.title}{status_str}</b> ({f.severity.upper()} · {f.agent_name})", bold_style)
+            Paragraph(f"<b>{_x(f.title)}{status_str}</b> ({_x(f.severity.upper())} · {_x(f.agent_name)})", bold_style)
         )
-        elements.append(Paragraph("<b>Problem:</b> " + f.description, body_style))
-        elements.append(Paragraph("<b>Suggested Fix:</b> " + f.recommendation, body_style))
+        if getattr(f, "quote", None):
+            elements.append(Paragraph("<b>RFC says:</b> <i>\u201c" + _x(f.quote) + "\u201d</i>", body_style))
+        elements.append(Paragraph("<b>Problem:</b> " + _x(f.description), body_style))
+        elements.append(Paragraph("<b>Suggested Fix:</b> " + _x(f.recommendation), body_style))
         if f.tradeoffs:
-            elements.append(Paragraph("<b>Trade-offs:</b> " + f.tradeoffs, body_style))
+            elements.append(Paragraph("<b>Trade-offs:</b> " + _x(f.tradeoffs), body_style))
         if getattr(f, "status_reason", None):
-            elements.append(Paragraph("<b>Status Reason:</b> " + f.status_reason, body_style))
+            elements.append(Paragraph("<b>Status Reason:</b> " + _x(f.status_reason), body_style))
         elements.append(Spacer(1, 8))
 
     doc.build(elements)

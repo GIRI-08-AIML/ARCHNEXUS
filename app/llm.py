@@ -1,6 +1,7 @@
 """LLM access layer. Agents only depend on the `LLMClient` protocol."""
 import json
 import logging
+import random
 import re
 import time
 from typing import Protocol
@@ -14,6 +15,22 @@ logger = logging.getLogger(__name__)
 
 class LLMError(RuntimeError):
     pass
+
+
+class RateLimitError(LLMError):
+    """The provider answered 429. `retry_after` is the wait it asked for, in seconds, if any."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    try:
+        value = float(resp.headers.get("retry-after", ""))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 class LLMClient(Protocol):
@@ -123,19 +140,53 @@ class OpenAICompatibleClient:
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            # Include the provider's own message: a bare "404 Not Found" hides the real reason
+            # (for example a retired model name).
+            body = (exc.response.text or "").strip().replace("\n", " ")[:300]
+            detail = f"{exc}" + (f" - provider said: {body}" if body else "")
+            if exc.response.status_code == 429:
+                raise RateLimitError(
+                    f"Cloud LLM rate limit (429){' - provider said: ' + body if body else ''}",
+                    _retry_after_seconds(exc.response),
+                ) from exc
+            raise LLMError(f"Cloud LLM request failed: {detail}") from exc
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             raise LLMError(f"Cloud LLM request failed: {exc}") from exc
 
+    def _rate_limit_wait(self, exc: RateLimitError, waits_so_far: int) -> float:
+        """Use the provider's Retry-After when given, otherwise back off 5, 10, 20, 40 ... seconds."""
+        if exc.retry_after is not None:
+            return exc.retry_after + 0.5
+        return min(5 * (2**waits_so_far), self.settings.llm_rate_limit_max_wait) + random.uniform(0, 1)
+
     def chat_json(self, messages: list[dict]) -> dict:
+        s = self.settings
         convo = list(messages)
         last_error: Exception | None = None
+        attempt = 0  # ordinary failures (errors, bad JSON); rate-limit waits do not use these up
+        rate_waits = 0
 
-        for attempt in range(self.settings.llm_max_retries + 1):
+        while attempt <= s.llm_max_retries:
             try:
                 content = self._chat(convo)
+            except RateLimitError as exc:
+                last_error = exc
+                too_long = exc.retry_after is not None and exc.retry_after > s.llm_rate_limit_max_wait
+                if too_long or rate_waits >= s.llm_rate_limit_retries:
+                    break  # a long wait usually means a daily limit, so waiting would not help
+                wait = self._rate_limit_wait(exc, rate_waits)
+                rate_waits += 1
+                logger.warning(
+                    "Cloud LLM rate limit hit; waiting %.0fs before retrying (%d/%d)",
+                    wait, rate_waits, s.llm_rate_limit_retries,
+                )
+                time.sleep(wait)
+                continue
             except LLMError as exc:
                 last_error = exc
-                logger.warning("Cloud LLM call failed (attempt %d): %s", attempt + 1, exc)
+                attempt += 1
+                logger.warning("Cloud LLM call failed (attempt %d): %s", attempt, exc)
                 time.sleep(self.RETRY_DELAY_SECONDS)
                 continue
 
@@ -143,7 +194,8 @@ class OpenAICompatibleClient:
                 return extract_json(content)
             except ValueError as exc:
                 last_error = exc
-                logger.warning("Invalid JSON from cloud model (attempt %d): %s", attempt + 1, exc)
+                attempt += 1
+                logger.warning("Invalid JSON from cloud model (attempt %d): %s", attempt, exc)
                 convo = convo + [
                     {"role": "assistant", "content": content},
                     {
@@ -152,6 +204,13 @@ class OpenAICompatibleClient:
                     },
                 ]
 
+        if isinstance(last_error, RateLimitError):
+            hint = (
+                f" The provider asked for a {last_error.retry_after:.0f}s wait, which looks like a daily limit."
+                if last_error.retry_after is not None and last_error.retry_after > s.llm_rate_limit_max_wait
+                else " Lower MAX_SPECIALIST_CONCURRENCY or try again in a minute."
+            )
+            raise LLMError(f"Cloud model call failed: rate limit exceeded.{hint} ({last_error})")
         raise LLMError(f"Cloud model call failed after retries: {last_error}")
 
 

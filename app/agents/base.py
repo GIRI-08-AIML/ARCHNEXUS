@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 
 from app.parser import ParsedRFC
-from app.schemas import DebateDraft, Decision, FindingDraft, JudgeVerdict
+from app.schemas import DebateDraft, Decision, FindingDraft, JudgeVerdict, VerifyDraft
 from pydantic import ValidationError
 
 from app.llm import LLMClient
@@ -39,7 +39,26 @@ ANALYSIS_FORMAT = """Return JSON in exactly this shape:
    "recommendation": "concrete fix",
    "tradeoffs": "cost or downside of the fix, or null"}
 ]}
-Report 3 to 6 findings, most severe first. Stay within your focus areas. Every finding must include a verbatim 'quote' directly from the RFC text."""
+Report 3 to 6 findings, most severe first. Stay within your focus areas.
+Every finding must include a verbatim 'quote' directly from the RFC text: the sentence that shows the problem.
+Read the whole RFC before you report something as missing. If the RFC already states a safeguard for a concern, do not report that concern.
+Only report real weaknesses. Fewer, correct findings are better than many doubtful ones."""
+
+VERIFY_FORMAT = """Return JSON in exactly this shape:
+{"verdict": "valid|already_addressed|contradicted",
+ "evidence": "the exact sentence copied from the RFC that proves your verdict, or an empty string for valid",
+ "reason": "one short sentence"}
+
+Rules:
+- "already_addressed": the RFC explicitly contains the safeguard, fix or mechanism that the finding says is missing.
+- "contradicted": the finding claims something about the system that the RFC clearly states the opposite of.
+- "valid": the RFC confirms the weakness, or says nothing about it. When in doubt, answer valid.
+- Evidence must be copied word for word from the RFC. Never invent it.
+
+Examples:
+RFC says "Tokens expire after 15 minutes." Finding: "Tokens never expire" -> {"verdict": "contradicted", "evidence": "Tokens expire after 15 minutes.", "reason": "The RFC states the tokens expire."}
+RFC says "We run one instance of each service." Finding: "Single point of failure" -> {"verdict": "valid", "evidence": "", "reason": "The RFC confirms there is a single instance."}
+RFC never mentions rate limits. Finding: "No rate limiting" -> {"verdict": "valid", "evidence": "", "reason": "The RFC says nothing about rate limits."}"""
 
 DEBATE_FORMAT = """Return JSON in exactly this shape:
 {"responses": [
@@ -88,6 +107,28 @@ def build_analysis_messages(spec: AgentSpec, project: str, parsed: ParsedRFC, ma
         f"{ANALYSIS_FORMAT}"
     )
     return [{"role": "system", "content": spec.system_prompt}, {"role": "user", "content": user}]
+
+
+VERIFIER_SYSTEM = (
+    "You are a strict fact-checker for software architecture review findings. "
+    "You are given an RFC and one finding about it. Check the finding against the RFC text only. "
+    "Always answer with a single valid JSON object and nothing else."
+)
+
+
+def build_verify_messages(project: str, rfc_text: str, finding: dict, max_chars: int) -> list[dict]:
+    rfc = rfc_text if len(rfc_text) <= max_chars else rfc_text[:max_chars] + "\n[... RFC truncated for length ...]"
+    user = (
+        "TASK: VERIFY\n"
+        f"Project: {project}\n\n"
+        f"--- RFC START ---\n{rfc}\n--- RFC END ---\n\n"
+        f"Finding title: {finding.get('title', '')}\n"
+        f"Finding description: {finding.get('description', '')}\n"
+        f"Finding recommendation: {finding.get('recommendation', '')}\n\n"
+        "Does the RFC already address this concern, or contradict what the finding claims?\n"
+        f"{VERIFY_FORMAT}"
+    )
+    return [{"role": "system", "content": VERIFIER_SYSTEM}, {"role": "user", "content": user}]
 
 
 def build_debate_messages(
@@ -150,6 +191,23 @@ def run_debate(
         except ValidationError:
             continue
     return drafts
+
+
+def normalize_text(text: str | None) -> str:
+    return " ".join((text or "").split()).lower()
+
+
+def text_in_rfc(snippet: str | None, rfc_text: str | None, min_len: int = 1) -> bool:
+    """True if the snippet appears word for word (ignoring case and spacing) in the RFC."""
+    s = normalize_text(snippet).strip(" .\"'\u201c\u201d")
+    return len(s) >= min_len and s in normalize_text(rfc_text)
+
+
+def run_verification(
+    llm: LLMClient, project: str, rfc_text: str, finding: dict, max_chars: int
+) -> VerifyDraft:
+    data = llm.chat_json(build_verify_messages(project, rfc_text, finding, max_chars))
+    return VerifyDraft.model_validate(data)
 
 
 def run_judge(
