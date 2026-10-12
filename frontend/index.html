@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>ArchNexus</title>
+  <link rel="stylesheet" href="/ui/styles.css">
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="#/">ArchNexus</a>
+      <nav aria-label="Main">
+        <span id="nav-links" hidden>
+          <a href="#/">New review</a>
+          <a href="#/history">All reviews</a>
+          <a href="#/workspace">Workspace</a>
+          <a href="/docs" target="_blank" rel="noopener">API docs</a>
+        </span>
+        <span id="user"></span>
+      </nav>
+    </div>
+  </header>
+  <div id="banner" role="status" hidden></div>
+  <main id="app" tabindex="-1">
+    <noscript><div class="wrap"><p class="empty">ArchNexus needs JavaScript to show reviews.</p></div></noscript>
+  </main>
+  <footer class="wrap foot">
+    ArchNexus runs on your machine with local models. Reviews are a first pass, so check important findings yourself.
+  </footer>
+  <script src="/ui/app.js"></script>
+</body>
+</html>
