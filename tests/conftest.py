@@ -34,6 +34,16 @@ One orders table with a JSON column for line items. No indexes beyond the primar
 """
 
 
+# One distinct sentence per agent, so the five fake findings are five different problems (not duplicates).
+FAKE_QUOTES = {
+    "Architecture Agent": "A single FastAPI service writes orders",
+    "Security Agent": "JWT tokens that do not expire",
+    "Database Agent": "One orders table with a JSON column for line items",
+    "Scalability Agent": "Handle 500 orders per second at peak",
+    "Reliability Agent": "The payment provider is called synchronously",
+}
+
+
 class FakeLLM:
     """Deterministic stand-in for Ollama. Dispatches on the TASK marker in the prompt."""
 
@@ -60,7 +70,7 @@ class FakeLLM:
                         "category": "demo",
                         "severity": "critical" if who == "Security Agent" else "medium",
                         "title": f"{who} finding",
-                        "quote": "JWT tokens that do not expire" if who == "Security Agent" else "A single FastAPI service writes orders",
+                        "quote": FAKE_QUOTES[who],
                         "description": "d",
                         "recommendation": "r",
                         "tradeoffs": None,

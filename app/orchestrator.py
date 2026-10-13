@@ -4,6 +4,7 @@ Pipeline:  RFC -> Parser -> specialists (independent analysis) -> debate rounds
            -> Judge Agent -> Final Report -> PostgreSQL
 """
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -13,6 +14,8 @@ from app.agents import ALL_SPECS, JUDGE_SPEC, SPECIALISTS
 from app.agents.base import (
     AgentSpec,
     apply_guardrails,
+    find_duplicate,
+    lowered_severity,
     heuristic_verdict,
     run_analysis,
     run_debate,
@@ -24,8 +27,11 @@ from app.config import Settings, get_settings
 from app.llm import LLMClient, LLMError
 from app.models import Agent, Debate, FinalReport, Finding, Project, Review
 from app.parser import parse_rfc
+from app.schemas import Severity
 
 logger = logging.getLogger(__name__)
+
+_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def seed_agents(db: Session) -> dict[str, Agent]:
@@ -55,6 +61,14 @@ def fail_interrupted_reviews(db: Session) -> int:
     return len(stale)
 
 
+@dataclass
+class Check:
+    """What the evidence check decided about one finding."""
+
+    remove_reason: str | None = None  # set when the RFC already addresses or contradicts the finding
+    severity: Severity | None = None  # a lower severity to apply; None leaves the rating as it is
+
+
 class ReviewOrchestrator:
     def __init__(self, db: Session, llm: LLMClient, settings: Settings | None = None):
         self.db = db
@@ -62,6 +76,8 @@ class ReviewOrchestrator:
         self.settings = settings or get_settings()
         self.removed_by_verifier: list[dict] = []  # findings the RFC already addresses or contradicts
         self.unverified: list[str] = []  # titles of findings the verifier could not check (model call failed)
+        self.downgraded: list[dict] = []  # findings whose severity the evidence check lowered
+        self.merged: list[dict] = []  # duplicate findings folded into another agent's finding
 
     # ------------------------------------------------------------------ public
     def run(self, review_id: int) -> Review:
@@ -113,36 +129,45 @@ class ReviewOrchestrator:
         transcript = self._debate_rounds(review, agents, findings)
         self._judge(review, project.name, agents, findings, transcript)
 
-    def _verify_finding(self, project_name: str, rfc_text: str, d) -> str | None:
-        """Return a reason if the RFC already addresses or contradicts the finding, else None.
+    def _verify_finding(self, project_name: str, rfc_text: str, d) -> Check:
+        """Check one finding against the RFC.
 
-        Any doubt keeps the finding: a failed call, an unclear answer, or evidence that is
-        not found word for word in the RFC all mean "keep".
+        `remove_reason` is set if the RFC already addresses or contradicts the finding. `severity` is set
+        if the finding deserves a lower rating. Any doubt keeps the finding exactly as it is: a failed
+        call, an unclear answer, or evidence that is not found word for word in the RFC.
         """
+        current = getattr(d, "severity", Severity.medium)
         try:
             result = run_verification(
                 self.llm,
                 project_name,
                 rfc_text,
-                {"title": d.title, "description": d.description, "recommendation": d.recommendation},
+                {
+                    "title": d.title,
+                    "description": d.description,
+                    "recommendation": d.recommendation,
+                    "severity": str(current),
+                },
                 self.settings.max_rfc_chars_in_prompt,
             )
         except Exception as exc:  # noqa: BLE001 - LLMError or invalid JSON
             logger.warning("Verification of '%s' failed (%s); keeping the finding", d.title, exc)
             self.unverified.append(d.title)  # list.append is safe from the worker threads
-            return None
+            return Check()
         if result.verdict == "valid":
-            return None
+            lower = lowered_severity(current, result.severity)
+            return Check(severity=lower if lower != current else None)
         if not text_in_rfc(result.evidence, rfc_text, min_len=15):
             logger.info("Verifier evidence for '%s' not found in the RFC; keeping the finding", d.title)
-            return None
-        return f"{result.verdict.replace('_', ' ')}: {result.evidence}"
+            return Check()
+        return Check(remove_reason=f"{result.verdict.replace('_', ' ')}: {result.evidence}")
 
     def _analysis_round(self, review, project_name, parsed, agents) -> dict[str, list[dict]]:
         import concurrent.futures
 
         collected: dict[str, list[dict]] = {}
         failures: list[str] = []
+        accepted: list[dict] = []  # every finding kept so far, for duplicate detection
         rfc_text = review.rfc_text or ""
 
         def analyze_spec(spec):
@@ -162,11 +187,19 @@ class ReviewOrchestrator:
                     continue
                 # Fact check: drop findings the RFC already addresses or contradicts.
                 if self.settings.verify_findings and rfc_text:
-                    reason = self._verify_finding(project_name, rfc_text, d)
-                    if reason:
-                        logger.info("Dropping finding '%s' from %s: %s", d.title, spec.name, reason)
-                        removed.append({"agent": spec.name, "title": d.title, "reason": reason})
+                    check = self._verify_finding(project_name, rfc_text, d)
+                    if check.remove_reason:
+                        logger.info("Dropping finding '%s' from %s: %s", d.title, spec.name, check.remove_reason)
+                        removed.append({"agent": spec.name, "title": d.title, "reason": check.remove_reason})
                         continue
+                    if check.severity is not None:
+                        logger.info(
+                            "Lowering severity of '%s' from %s: %s -> %s", d.title, spec.name, d.severity, check.severity
+                        )
+                        self.downgraded.append(
+                            {"agent": spec.name, "title": d.title, "from": str(d.severity), "to": str(check.severity)}
+                        )
+                        d = d.model_copy(update={"severity": check.severity})
                 kept.append((d, is_valid))
             return spec.name, kept, removed, None
 
@@ -183,33 +216,45 @@ class ReviewOrchestrator:
 
                 spec_findings = []
                 for d, is_valid in kept:
-                    self.db.add(
-                        Finding(
-                            review_id=review.id,
-                            agent_id=agents[name].id,
-                            round=1,
-                            category=d.category[:100],
-                            severity=d.severity.value,
-                            title=d.title[:300],
-                            description=d.description,
-                            recommendation=d.recommendation,
-                            tradeoffs=d.tradeoffs,
-                            quote=d.quote[:1000] if d.quote else None,
-                            quote_valid=is_valid,
-                        )
+                    # Several agents often report the same problem. Keep one finding and note who else raised it.
+                    dup = find_duplicate(d, [a["draft"] for a in accepted])
+                    if dup is not None:
+                        first = accepted[dup]
+                        logger.info("Merging '%s' from %s into '%s'", d.title, name, first["draft"].title)
+                        self.merged.append({"agent": name, "title": d.title, "into": first["draft"].title})
+                        first["row"].description = f"{first['row'].description}\n\nAlso flagged by the {name}."
+                        if _RANK[str(d.severity)] > _RANK[str(first["draft"].severity)]:
+                            first["row"].severity = d.severity.value
+                            first["item"]["severity"] = d.severity.value
+                            first["draft"] = first["draft"].model_copy(update={"severity": d.severity})
+                        continue
+
+                    row = Finding(
+                        review_id=review.id,
+                        agent_id=agents[name].id,
+                        round=1,
+                        category=d.category[:100],
+                        severity=d.severity.value,
+                        title=d.title[:300],
+                        description=d.description,
+                        recommendation=d.recommendation,
+                        tradeoffs=d.tradeoffs,
+                        quote=d.quote[:1000] if d.quote else None,
+                        quote_valid=is_valid,
                     )
-                    spec_findings.append(
-                        {
-                            "severity": d.severity.value,
-                            "title": d.title,
-                            "recommendation": d.recommendation,
-                            "tradeoffs": d.tradeoffs,
-                            "quote": d.quote,
-                        }
-                    )
+                    self.db.add(row)
+                    item = {
+                        "severity": d.severity.value,
+                        "title": d.title,
+                        "recommendation": d.recommendation,
+                        "tradeoffs": d.tradeoffs,
+                        "quote": d.quote,
+                    }
+                    spec_findings.append(item)
+                    accepted.append({"draft": d, "row": row, "item": item})
                 if spec_findings:
                     collected[name] = spec_findings
-                    self.db.commit()
+                self.db.commit()
 
         if not collected:
             if len(failures) == len(SPECIALISTS):
@@ -279,6 +324,14 @@ class ReviewOrchestrator:
                 f"Evidence check: {n} finding{'s' if n != 1 else ''} removed because the RFC already "
                 f"addresses or contradicts {'them' if n != 1 else 'it'}."
             )
+        if self.downgraded:
+            n = len(self.downgraded)
+            notes.append(
+                f"{n} severity rating{'s' if n != 1 else ''} lowered after checking {'them' if n != 1 else 'it'} against the RFC."
+            )
+        if self.merged:
+            n = len(self.merged)
+            notes.append(f"{n} duplicate finding{'s' if n != 1 else ''} merged.")
         if self.unverified:
             n = len(self.unverified)
             notes.append(

@@ -1,9 +1,10 @@
 """Agent specs and prompt builders shared by every agent."""
 import json
+import re
 from dataclasses import dataclass
 
 from app.parser import ParsedRFC
-from app.schemas import DebateDraft, Decision, FindingDraft, JudgeVerdict, VerifyDraft
+from app.schemas import DebateDraft, Decision, FindingDraft, JudgeVerdict, Severity, VerifyDraft
 from pydantic import ValidationError
 
 from app.llm import LLMClient
@@ -29,6 +30,14 @@ class AgentSpec:
         )
 
 
+SEVERITY_GUIDE = """Severity guide. Be strict: most findings are medium or low, and most RFCs have no critical finding.
+- critical: as written, the design will lose data, expose data, be exploitable, or cannot meet a goal the RFC states, and the RFC describes no mitigation.
+- high: likely to cause an outage or a serious defect in normal operation. The RFC describes no mitigation, or only a weak one.
+- medium: worth fixing before launch, but the system still works without it. This includes detail that a normal design review would ask for.
+- low: a minor gap or a nice-to-have.
+Lower the severity by one level when the RFC already has a partial safeguard.
+Never rate a problem high or critical if it only appears when you assume something the RFC does not say (for example the exact load, or how a component is configured)."""
+
 ANALYSIS_FORMAT = """Return JSON in exactly this shape:
 {"findings": [
   {"category": "short topic",
@@ -42,11 +51,16 @@ ANALYSIS_FORMAT = """Return JSON in exactly this shape:
 Report 3 to 6 findings, most severe first. Stay within your focus areas.
 Every finding must include a verbatim 'quote' directly from the RFC text: the sentence that shows the problem.
 Read the whole RFC before you report something as missing. If the RFC already states a safeguard for a concern, do not report that concern.
-Only report real weaknesses. Fewer, correct findings are better than many doubtful ones."""
+Only report real weaknesses. Fewer, correct findings are better than many doubtful ones.
+If the RFC itself says something is undecided or still an open question, report that as a finding.
+
+@@SEVERITY_GUIDE@@"""
+ANALYSIS_FORMAT = ANALYSIS_FORMAT.replace("@@SEVERITY_GUIDE@@", SEVERITY_GUIDE)
 
 VERIFY_FORMAT = """Return JSON in exactly this shape:
 {"verdict": "valid|already_addressed|contradicted",
  "evidence": "the exact sentence copied from the RFC that proves your verdict, or an empty string for valid",
+ "severity": "critical|high|medium|low",
  "reason": "one short sentence"}
 
 Rules:
@@ -54,11 +68,17 @@ Rules:
 - "contradicted": the finding claims something about the system that the RFC clearly states the opposite of.
 - "valid": the RFC confirms the weakness, or says nothing about it. When in doubt, answer valid.
 - Evidence must be copied word for word from the RFC. Never invent it.
+- "severity": the severity this finding deserves, using the guide below. Keep the severity it was given, or lower it. Never raise it.
+  Lower it when the RFC already partly covers the concern, or when the problem only appears if you assume something the RFC does not say.
+
+@@SEVERITY_GUIDE@@
 
 Examples:
-RFC says "Tokens expire after 15 minutes." Finding: "Tokens never expire" -> {"verdict": "contradicted", "evidence": "Tokens expire after 15 minutes.", "reason": "The RFC states the tokens expire."}
-RFC says "We run one instance of each service." Finding: "Single point of failure" -> {"verdict": "valid", "evidence": "", "reason": "The RFC confirms there is a single instance."}
-RFC never mentions rate limits. Finding: "No rate limiting" -> {"verdict": "valid", "evidence": "", "reason": "The RFC says nothing about rate limits."}"""
+RFC says "Tokens expire after 15 minutes." Finding (high): "Tokens never expire" -> {"verdict": "contradicted", "evidence": "Tokens expire after 15 minutes.", "severity": "high", "reason": "The RFC states the tokens expire."}
+RFC says "We run one instance of each service." Finding (high): "Single point of failure" -> {"verdict": "valid", "evidence": "", "severity": "high", "reason": "The RFC confirms there is a single instance."}
+RFC never mentions rate limits. Finding (medium): "No rate limiting" -> {"verdict": "valid", "evidence": "", "severity": "medium", "reason": "The RFC says nothing about rate limits."}
+RFC says "Images are cached for 10 minutes." Finding (high): "No cache invalidation" -> {"verdict": "valid", "evidence": "", "severity": "low", "reason": "Images can be stale for at most 10 minutes, which is a small, bounded problem."}"""
+VERIFY_FORMAT = VERIFY_FORMAT.replace("@@SEVERITY_GUIDE@@", SEVERITY_GUIDE)
 
 DEBATE_FORMAT = """Return JSON in exactly this shape:
 {"responses": [
@@ -123,6 +143,7 @@ def build_verify_messages(project: str, rfc_text: str, finding: dict, max_chars:
         f"Project: {project}\n\n"
         f"--- RFC START ---\n{rfc}\n--- RFC END ---\n\n"
         f"Finding title: {finding.get('title', '')}\n"
+        f"Finding severity as given: {finding.get('severity', 'medium')}\n"
         f"Finding description: {finding.get('description', '')}\n"
         f"Finding recommendation: {finding.get('recommendation', '')}\n\n"
         "Does the RFC already address this concern, or contradict what the finding claims?\n"
@@ -201,6 +222,63 @@ def text_in_rfc(snippet: str | None, rfc_text: str | None, min_len: int = 1) -> 
     """True if the snippet appears word for word (ignoring case and spacing) in the RFC."""
     s = normalize_text(snippet).strip(" .\"'\u201c\u201d")
     return len(s) >= min_len and s in normalize_text(rfc_text)
+
+
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def lowered_severity(current: Severity, suggested: str | None) -> Severity:
+    """The verifier may lower a severity, never raise it. Unknown answers change nothing."""
+    if suggested in _SEVERITY_RANK and _SEVERITY_RANK[suggested] < _SEVERITY_RANK[str(current)]:
+        return Severity(suggested)
+    return current
+
+
+# ------------------------------------------------------------- duplicate findings
+_STOPWORDS = frozenset(
+    "a an the of to for and or in on at by with without is are be as it its this that from not no into than then "
+    "so can may might must should will would could per via across between over under both each any all lacks lack "
+    "missing insufficient limited potential unclear explicit explicitly define defined add use using implement adopt".split()
+)
+
+
+def _tokens(text: str) -> set[str]:
+    out = set()
+    for w in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if len(w) < 3 or w in _STOPWORDS:
+            continue
+        if w.endswith("ies") and len(w) > 4:
+            w = w[:-3] + "y"
+        elif w.endswith("s") and not w.endswith("ss") and len(w) > 3:
+            w = w[:-1]
+        out.add(w)
+    return out
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    return len(a & b) / len(a | b) if (a | b) else 0.0
+
+
+def find_duplicate(new, existing: list) -> int | None:
+    """Index of the finding in `existing` that says the same thing as `new`, or None.
+
+    Two findings are the same when they share one RFC quote and talk about the same fix (many different
+    problems quote the same sentence, so the quote alone is not enough), or when their titles are nearly
+    identical. Tuned on a real review of 19 findings: the two real duplicates scored 0.23 and 0.26 on the
+    shared-quote test, the closest pair of different problems that shared a quote scored 0.05, and no pair of
+    different problems scored above 0.25 on titles alone.
+    """
+    new_quote = " ".join(re.sub(r"[^a-z0-9 ]", " ", (new.quote or "").lower()).split())
+    new_title = _tokens(new.title)
+    new_title_rec = _tokens(f"{new.title} {new.recommendation}")
+    for i, other in enumerate(existing):
+        if _jaccard(new_title, _tokens(other.title)) >= 0.6:
+            return i
+        other_quote = " ".join(re.sub(r"[^a-z0-9 ]", " ", (other.quote or "").lower()).split())
+        if new_quote and new_quote == other_quote:
+            if _jaccard(new_title_rec, _tokens(f"{other.title} {other.recommendation}")) >= 0.15:
+                return i
+    return None
 
 
 def run_verification(

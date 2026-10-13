@@ -1,0 +1,154 @@
+[
+ {
+  "agent": "Architecture",
+  "severity": "medium",
+  "title": "Missing distributed tracing across API and workers",
+  "quote": "We track queue depth, delivery latency, failure rate by provider, and dead-letter count on a dashboard.",
+  "description": "Latency metrics are collected per component, but there is no mention of end-to-end request tracing. Without trace IDs propagated from the caller through the API, queue, and worker, root-cause analysis of slow or failed deliveries will be difficult.",
+  "recommendation": "Instrument both the Notification API and worker processes with a tracing system (e.g., OpenTelemetry) and propagate a correlation ID through the queue payload."
+ },
+ {
+  "agent": "Architecture",
+  "severity": "medium",
+  "title": "Provider failover logic lacks circuit-breaker granularity",
+  "quote": "If the primary delivery provider is down for more than two minutes, workers switch to the backup provider.",
+  "description": "A simple time-based switch can cause a thundering herd when the primary recovers, and may keep using a degraded backup provider longer than necessary. No per-provider error rate monitoring or circuit-breaker is described.",
+  "recommendation": "Implement a circuit-breaker pattern that tracks error rates per provider and automatically trips after a configurable threshold, with back-off before retrying the primary."
+ },
+ {
+  "agent": "Architecture",
+  "severity": "low",
+  "title": "Token renewal mechanism not defined",
+  "quote": "Services authenticate to the API with short-lived tokens that expire after 15 minutes and are renewed automatically.",
+  "description": "The RFC states automatic renewal but does not specify how tokens are issued, rotated, or protected against replay. Ambiguity could lead to insecure implementations.",
+  "recommendation": "Adopt a standard OAuth2 client-credentials flow with a dedicated token service; document token issuance, revocation, and rotation procedures."
+ },
+ {
+  "agent": "Architecture",
+  "severity": "low",
+  "title": "No explicit data-deletion policy for GDPR/CCPA",
+  "quote": "Rows older than 90 days are moved to cheaper archive storage. User contact details are encrypted at rest.",
+  "description": "Archiving data without a defined purge schedule may conflict with data-subject deletion rights required by privacy regulations.",
+  "recommendation": "Define a retention policy that includes secure deletion after a configurable period (e.g., 180 days) and implement automated purge jobs."
+ },
+ {
+  "agent": "Security",
+  "severity": "critical",
+  "title": "Insufficient token revocation and scope enforcement",
+  "quote": "Services authenticate to the API with short-lived tokens that expire after 15 minutes and are renewed automatically.",
+  "description": "If a short-lived token is compromised it remains valid for up to 15 minutes and there is no described mechanism to revoke it or to validate its audience and scopes. An attacker could reuse a stolen token to send unauthorized notifications or exhaust rate limits.",
+  "recommendation": "Adopt a zero-trust token model: issue JWTs signed with a rotating key, include audience, scopes, and a unique nonce, and provide an introspection/revocation endpoint that workers check before accepting a request. Enforce scope checks server-side for each message type."
+ },
+ {
+  "agent": "Security",
+  "severity": "high",
+  "title": "Missing key management for encrypted contact details",
+  "quote": "User contact details are encrypted at rest.",
+  "description": "The RFC states data is encrypted but does not describe how encryption keys are stored, rotated, or protected. Poor key management could allow an insider or attacker with DB access to decrypt PII, violating compliance (e.g., GDPR).",
+  "recommendation": "Use a dedicated KMS (e.g., Cloud KMS or HashiCorp Vault) to generate, store, and rotate data-encryption keys. Enforce least-privilege IAM policies so only the service layer can access keys, and enable automatic key rotation."
+ },
+ {
+  "agent": "Security",
+  "severity": "medium",
+  "title": "Audit log integrity and protection not addressed",
+  "quote": "Every request is written to an audit log.",
+  "description": "The RFC does not specify how audit logs are protected against tampering, who can read them, or whether they are encrypted. An attacker with write access could alter logs to hide malicious activity, undermining forensic capabilities.",
+  "recommendation": "Store audit logs in an append-only, tamper-evident system (e.g., write-once storage, WORM S3 bucket, or signed log entries). Restrict read/write access via IAM and enable encryption at rest and in transit."
+ },
+ {
+  "agent": "Security",
+  "severity": "medium",
+  "title": "Potential data leakage between callers",
+  "quote": "Each calling service has its own credentials and may only send the message types it was granted.",
+  "description": "The RFC only restricts send permissions but does not describe isolation of read access to user preferences or audit data. A compromised service could query the API for another tenant's preferences, exposing PII.",
+  "recommendation": "Implement tenant-aware access controls: associate each request with a caller ID and enforce row-level security in PostgreSQL so services can only read rows they own. Audit any cross-tenant reads."
+ },
+ {
+  "agent": "Security",
+  "severity": "medium",
+  "title": "Dead-letter queue may contain unencrypted PII",
+  "quote": "Messages that still fail go to a dead-letter queue, and an alert fires when it is not empty.",
+  "description": "Failed messages often contain the original payload, which can include user contact details or message content. Storing them in a DLQ without encryption risks exposure if the queue storage is accessed by unauthorized parties.",
+  "recommendation": "Encrypt DLQ messages at rest using the same KMS as for contact details, and restrict queue access to only the worker and monitoring services. Optionally purge DLQ after a short retention period."
+ },
+ {
+  "agent": "Database",
+  "severity": "high",
+  "title": "Potential loss of atomicity between DB write and queue enqueue",
+  "quote": "Callers send a request to the Notification API, which validates it, stores it in PostgreSQL, and puts a job on a durable queue.",
+  "description": "If the database write succeeds but the enqueue fails (or vice-versa), the system can either lose a notification or deliver it twice, violating the 95 % delivery SLA and idempotency guarantee.",
+  "recommendation": "Wrap the INSERT and queue publish in a single atomic unit, e.g., using PostgreSQL's NOTIFY/LISTEN with a transactional outbox pattern or a two-phase commit with the queue broker."
+ },
+ {
+  "agent": "Database",
+  "severity": "high",
+  "title": "Missing indexes on delivery attempt records",
+  "quote": "Requests and delivery attempts are stored in PostgreSQL.",
+  "description": "Observability dashboards query delivery latency and failure rates; without indexes on columns such as request_id, provider, or status, those queries will scan large tables, increasing latency and load on the primary DB. Suggested Fix: Create covering indexes on delivery_attempts(request_id), delivery_attempts(status, created_at) and any columns used for frequent reporting. Trade-offs: Additional storage and write-amplification; must monitor index bloat as volume grows.",
+  "recommendation": "Create covering indexes on delivery_attempts(request_id), delivery_attempts(status, created_at) and any columns used for frequent reporting."
+ },
+ {
+  "agent": "Database",
+  "severity": "medium",
+  "title": "Unclear access to archived rows may break audit/compliance queries",
+  "quote": "Rows older than 90 days are moved to cheaper archive storage.",
+  "description": "Audit logs and regulatory checks often need to query data beyond 90 days. Moving rows without a defined retrieval mechanism can cause gaps in investigations and increase latency when data must be re-hydrated.",
+  "recommendation": "Define an archive tier (e.g., partitioned tables with foreign data wrapper to cold storage) and expose a read-through API that transparently fetches archived rows when needed."
+ },
+ {
+  "agent": "Database",
+  "severity": "medium",
+  "title": "Encryption at rest lacks key rotation and access control details",
+  "quote": "User contact details are encrypted at rest.",
+  "description": "Storing encrypted PII without a clear key-management process risks key compromise and non-compliance with data-protection regulations.",
+  "recommendation": "Adopt a KMS (e.g., AWS KMS, HashiCorp Vault) to manage encryption keys, enforce regular rotation, and audit key usage."
+ },
+ {
+  "agent": "Scalability",
+  "severity": "high",
+  "title": "Primary PostgreSQL write bottleneck at target throughput",
+  "quote": "Callers send a request to the Notification API, which validates it, stores it in PostgreSQL, and puts a job on a durable queue.",
+  "description": "At the stated goal of 2,000 messages/second, every request results in a write (and an index insert for the idempotency key) to a single primary instance. The unique index and row-level locks can quickly saturate CPU, I/O, and cause latency spikes, threatening the 95%-within-10-seconds SLA.",
+  "recommendation": "Introduce write scaling – e.g., partition the requests table by time or caller, use a sharded/distributed SQL store, or add a high-throughput write-optimized service (e.g., Kafka) that later persists to PostgreSQL in batches. Also consider moving the idempotency index to a separate table to reduce contention."
+ },
+ {
+  "agent": "Scalability",
+  "severity": "low",
+  "title": "No explicit rate limiting for external delivery providers",
+  "quote": "Delivery calls use a 5 second timeout and up to five retries with exponential backoff.",
+  "description": "External email/SMS/push providers often enforce per-second limits. Unlimited parallel calls from many workers could trigger provider throttling, leading to increased retries and dead-letter volume.",
+  "recommendation": "Add provider-specific token-bucket rate limiters in the worker code and expose metrics for provider call rates. Adjust backoff strategy based on provider feedback."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "high",
+  "title": "Potential single point of failure in the job queue",
+  "quote": "puts a job on a durable queue. Stateless worker processes read jobs from the queue",
+  "description": "The RFC mentions a \"durable queue\" but does not specify replication or multi-AZ placement. If the queue node or its storage zone fails, workers lose jobs and delivery stalls, breaking the 95 % latency goal.",
+  "recommendation": "Deploy the queue with built-in replication (e.g., a replicated Kafka topic or a multi-AZ managed queue) and configure cross-zone failover; add health checks and automatic leader election."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "medium",
+  "title": "Insufficient circuit-breaker logic for delivery providers",
+  "quote": "If the primary delivery provider is down for more than two minutes, workers switch to the backup provider.",
+  "description": "Switching after a fixed 2-minute window can cause a flood of requests to a failing provider, exhausting resources and inflating latency. No back-off or circuit-breaker is described for the backup provider either.",
+  "recommendation": "Implement per-provider circuit breakers with failure thresholds and exponential back-off; monitor health continuously and pause retries while the provider is tripped."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "medium",
+  "title": "Missing graceful shutdown / duplicate job handling for workers",
+  "quote": "Stateless worker processes read jobs from the queue, check the user preferences, render the template, and call the delivery provider.",
+  "description": "The RFC does not describe how workers acknowledge jobs or handle in-flight messages during scaling down or crashes. Without explicit ack semantics, a job may be re-queued and processed twice.",
+  "recommendation": "Use a queue that supports explicit ack after successful delivery and implement shutdown hooks that stop pulling new jobs while completing in-flight work before exiting."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "high",
+  "title": "Limited disaster-recovery scope to database backups only",
+  "quote": "The database takes a nightly backup and continuous log archiving, and we test a restore every quarter.",
+  "description": "Only the PostgreSQL data is backed up. The service layer, queue, and configuration are not covered, leaving the system vulnerable to region-wide outages or infrastructure loss.",
+  "recommendation": "Deploy the service in multiple regions with active-passive or active-active replication; replicate the queue and use infrastructure-as-code snapshots for rapid failover; include regular DR drills."
+ }
+]

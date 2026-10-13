@@ -124,6 +124,13 @@ class VerifyDraft(BaseModel):
     verdict: str = "valid"  # valid | already_addressed | contradicted
     evidence: str | None = None
     reason: str | None = None
+    severity: str | None = None  # the severity the finding deserves; None when the model gave none or garbage
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _severity(cls, v: Any) -> str | None:
+        v = str(v).strip().lower() if v is not None else ""
+        return v if v in Severity._value2member_map_ else None
 
     @field_validator("verdict", mode="before")
     @classmethod

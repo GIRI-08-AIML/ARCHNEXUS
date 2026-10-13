@@ -187,3 +187,75 @@ def test_no_usable_findings_is_a_failure_not_an_approval(db):
     review = ReviewOrchestrator(db, EmptyLLM()).run(review_id)
     assert review.status == "failed"
     assert "no usable findings" in review.error
+
+
+# ------------------------------------------------ severity lowering and duplicate merging
+def _severity_of(db, review_id, title):
+    return next(f.severity for f in _findings(db, review_id) if f.title == title)
+
+
+def test_verifier_can_lower_a_severity(db):
+    rules = {"Security Agent finding": {"verdict": "valid", "evidence": "", "severity": "medium", "reason": "bounded"}}
+    review_id = _make_review(db)
+    review = ReviewOrchestrator(db, FakeLLM(verify_rules=rules)).run(review_id)
+    assert review.status == "completed"
+    assert _severity_of(db, review_id, "Security Agent finding") == "medium"  # was critical
+    summary = db.scalar(select(FinalReport)).summary
+    assert "0 critical" in summary  # the audit line and the score caps use the lowered rating
+    assert "1 severity rating lowered" in summary
+
+
+def test_verifier_can_never_raise_a_severity(db):
+    rules = {"Architecture Agent finding": {"verdict": "valid", "evidence": "", "severity": "critical", "reason": "x"}}
+    review_id = _make_review(db)
+    ReviewOrchestrator(db, FakeLLM(verify_rules=rules)).run(review_id)
+    assert _severity_of(db, review_id, "Architecture Agent finding") == "medium"
+    assert "lowered" not in db.scalar(select(FinalReport)).summary
+
+
+def test_severity_is_not_lowered_when_the_verifier_evidence_is_invented(db):
+    """An 'already addressed' answer with made-up evidence is not trusted for anything, including severity."""
+    rules = {
+        "Security Agent finding": {
+            "verdict": "already_addressed",
+            "evidence": "We use hardware security modules everywhere.",
+            "severity": "low",
+            "reason": "made up",
+        }
+    }
+    review_id = _make_review(db)
+    ReviewOrchestrator(db, FakeLLM(verify_rules=rules)).run(review_id)
+    assert _severity_of(db, review_id, "Security Agent finding") == "critical"
+
+
+def test_duplicate_findings_from_two_agents_are_merged(db):
+    class DupLLM(FakeLLM):
+        def chat_json(self, messages):
+            user = messages[-1]["content"]
+            if user.startswith("TASK: ANALYSIS"):
+                who = messages[0]["content"].split(" on a software")[0].replace("You are the ", "")
+                if who in ("Architecture Agent", "Reliability Agent"):
+                    return {
+                        "findings": [
+                            {
+                                "category": "reliability",
+                                "severity": "medium" if who == "Architecture Agent" else "high",
+                                "title": "No circuit breaker on the payment provider",
+                                "quote": "The payment provider is called synchronously",
+                                "description": f"{who} says the provider call can hang.",
+                                "recommendation": "Add a circuit breaker",
+                            }
+                        ]
+                    }
+            return super().chat_json(messages)
+
+    review_id = _make_review(db)
+    review = ReviewOrchestrator(db, DupLLM()).run(review_id)
+    assert review.status == "completed"
+    findings = _findings(db, review_id)
+    same = [f for f in findings if f.title == "No circuit breaker on the payment provider"]
+    assert len(same) == 1  # one row, not two
+    assert len(findings) == 4  # three other agents + the merged finding
+    assert "Also flagged by the" in same[0].description
+    assert same[0].severity == "high"  # the higher of the two ratings wins
+    assert "1 duplicate finding merged" in db.scalar(select(FinalReport)).summary
