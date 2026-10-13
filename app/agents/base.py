@@ -96,7 +96,13 @@ JUDGE_FORMAT = """Return JSON in exactly this shape:
  "recommendations": ["prioritised, actionable items"],
  "key_risks": ["the most important remaining risks"]}
 Decision guide: reject if any unresolved critical issue exists; approve_with_changes if
-there are high-severity issues that can be fixed; approve otherwise."""
+there are high-severity issues that can be fixed; approve otherwise.
+
+Writing the summary:
+- Use only what the findings and the debate say. Use each finding's severity exactly as given: only findings
+  listed as rated critical or high may be called high-severity or critical.
+- Do not state as fact something a finding only suggests. Write "may" or "could" for risks the RFC does not confirm.
+- Do not repeat the finding counts. They are added automatically."""
 
 
 JUDGE_SPEC = AgentSpec(
@@ -176,13 +182,25 @@ def build_debate_messages(
     return [{"role": "system", "content": spec.system_prompt}, {"role": "user", "content": user}]
 
 
+def _titles_rated(all_findings: dict[str, list[dict]], levels: tuple[str, ...]) -> list[str]:
+    return [
+        f"- {f.get('title', '')} ({name}, {f.get('severity')})"
+        for name, fs in all_findings.items()
+        for f in fs
+        if f.get("severity") in levels
+    ]
+
+
 def build_judge_messages(
     project: str, all_findings: dict[str, list[dict]], transcript: list[dict]
 ) -> list[dict]:
+    top = _titles_rated(all_findings, ("critical", "high"))
     user = (
         "TASK: JUDGE\n"
         f"Project: {project}\n\n"
         f"All specialist findings:\n{json.dumps(all_findings, indent=1)}\n\n"
+        "Findings rated critical or high (the only ones you may call high-severity or critical):\n"
+        f"{chr(10).join(top) if top else '(none)'}\n\n"
         f"Debate transcript:\n{json.dumps(transcript, indent=1) if transcript else '(none)'}\n\n"
         f"{JUDGE_FORMAT}"
     )
