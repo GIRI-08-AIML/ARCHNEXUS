@@ -1,0 +1,114 @@
+[
+ {
+  "agent": "Architecture",
+  "severity": "medium",
+  "title": "Potential SLA breach during provider failover",
+  "quote": "If the primary delivery provider is down for more than two minutes, workers switch to the backup provider.",
+  "description": "Switching providers after a two-minute outage can cause delivery latency to exceed the 10-second SLA, especially with exponential backoff retries, leading to missed delivery goals.",
+  "recommendation": "Implement faster provider health checks (e.g., sub-minute) and allow workers to pre-emptively route new jobs to the backup provider when the primary health check fails, while preserving in-flight retries. Trade-offs: More frequent health checks increase load on providers and add complexity to routing logic."
+ },
+ {
+  "agent": "Architecture",
+  "severity": "low",
+  "title": "No token revocation mechanism",
+  "quote": "Services authenticate to the API with short-lived tokens that expire after 15 minutes and are renewed automatically.",
+  "description": "If a token is compromised, there is no way to revoke it before its 15-minute expiry, exposing the API to unauthorized message submissions.",
+  "recommendation": "Introduce a revocation list or token introspection endpoint that can invalidate tokens immediately upon suspicion of compromise."
+ },
+ {
+  "agent": "Architecture",
+  "severity": "medium",
+  "title": "Undecided handling of time-zone aware quiet hours",
+  "quote": "Open question: how we handle time zones for quiet hours is not yet decided.",
+  "description": "Without a clear strategy, users in different zones may receive notifications during their personal quiet periods, violating the opt-out goal and potentially causing user dissatisfaction.",
+  "recommendation": "Define a time-zone aware quiet-hour model (e.g., store user-preferred TZ and evaluate quiet windows per user) before production rollout."
+ },
+ {
+  "agent": "Security",
+  "severity": "high",
+  "title": "Contact detail encryption lacks key lifecycle controls",
+  "quote": "User contact details are encrypted at rest.",
+  "description": "Encryption at rest is stated, yet the RFC provides no details on key generation, storage, rotation, or access controls. Without proper key management, encrypted PII could be decrypted by an attacker who gains access to the keys, violating compliance (e.g., GDPR).",
+  "recommendation": "Adopt a managed key management service (KMS) with automatic rotation, audit logging of key usage, and restrict key access to the database service only."
+ },
+ {
+  "agent": "Security",
+  "severity": "low",
+  "title": "Audit log integrity and retention not defined",
+  "quote": "Every request is written to an audit log.",
+  "description": "While logging is mentioned, the RFC does not describe protection against tampering, log storage durability, or retention period. An attacker could delete or alter logs to hide malicious activity, undermining forensic investigations and compliance reporting.",
+  "recommendation": "Write audit logs to an append-only, tamper-evident store (e.g., write-once storage, WORM, or signed log entries) and define retention policies aligned with regulatory requirements."
+ },
+ {
+  "agent": "Database",
+  "severity": "medium",
+  "title": "Idempotency key uniqueness not scoped per caller",
+  "quote": "Each request carries a caller-supplied idempotency key with a unique index, so a retry returns the original result instead of sending again.",
+  "description": "A global unique index on the idempotency key can cause collisions if different callers independently choose the same key, leading to unintended deduplication and dropped messages.",
+  "recommendation": "Create a composite unique index on (caller_id, idempotency_key) or include a namespace prefix per caller. Enforce this in the API validation layer."
+ },
+ {
+  "agent": "Database",
+  "severity": "low",
+  "title": "Undefined archiving mechanism for rows older than 90 days",
+  "quote": "Rows older than 90 days are moved to cheaper archive storage.” Problem: The RFC mentions moving old rows but does not specify how (partitioning, table inheritance, ETL). An ad-hoc move could break referential integrity, lose auditability, and cause performance spikes during migration. Suggested Fix: Implement time-based partitioning (PostgreSQL declarative partitioning) with a background job that detaches and archives partitions to cold storage (e.g., S3). Ensure foreign-key constraints are handled or removed for archived data. Trade-offs: Requires initial schema redesign and ongoing partition maintenance, but provides predictable performance and safe archival.",
+  "description": "The RFC mentions moving old rows but does not specify how (partitioning, table inheritance, ETL). An ad-hoc move could break referential integrity, lose auditability, and cause performance spikes during migration.",
+  "recommendation": "Implement time-based partitioning (PostgreSQL declarative partitioning) with a background job that detaches and archives partitions to cold storage (e.g., S3). Ensure foreign-key constraints are handled or removed for archived data."
+ },
+ {
+  "agent": "Database",
+  "severity": "low",
+  "title": "Potential missing indexes on delivery attempt tracking",
+  "quote": "We index requests by user id and created time.",
+  "description": "Delivery attempts likely need queries by status, provider, or retry count. Absence of indexes on these columns can degrade worker performance under 2,000 msgs/sec load.",
+  "recommendation": "Add covering indexes on delivery_attempts(status, next_retry_at) and on provider fields used for monitoring. Review query plans after load testing."
+ },
+ {
+  "agent": "Scalability",
+  "severity": "medium",
+  "title": "Missing cache for user preferences causes DB read pressure",
+  "quote": "Worker processes read jobs from the queue, check the user preferences, render the template, and call the delivery provider.",
+  "description": "Each worker job queries PostgreSQL for user preferences. With many workers scaling on queue depth, read traffic can spike, stressing the read replicas and increasing latency, especially for popular users.",
+  "recommendation": "Add a distributed cache (e.g., Redis or Memcached) for user preferences with a short TTL and cache-aside pattern. Populate/refresh the cache on preference changes."
+ },
+ {
+  "agent": "Scalability",
+  "severity": "low",
+  "title": "Provider fallback delay can cause backlog and latency spikes",
+  "quote": "If the primary delivery provider is down for more than two minutes, workers switch to the backup provider.",
+  "description": "During a provider outage, workers continue retrying the primary for up to two minutes before switching, each retry incurring a 5 s timeout. This can quickly fill the queue and push overall delivery latency beyond the 10 s target.",
+  "recommendation": "Add circuit-breaker logic: detect primary provider failure after the first timeout and immediately route subsequent jobs to the backup provider, or use bulkhead isolation per provider."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "high",
+  "title": "No automatic failover for primary PostgreSQL",
+  "quote": "Primary with two read replicas",
+  "description": "The design only mentions a primary DB with read replicas but provides no mechanism for automatic promotion of a replica if the primary becomes unavailable, creating a single point of failure that can cause service outage.",
+  "recommendation": "Implement automated failover (e.g., using Patroni, CloudSQL high-availability, or similar) and test failover drills regularly."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "medium",
+  "title": "Potential duplicate deliveries from worker retries",
+  "quote": "Each request carries a caller-supplied idempotency key with a unique index, so a retry returns the original result instead of sending again.",
+  "description": "The idempotency key protects against duplicate API calls, but workers may still process the same job multiple times after a crash or timeout, leading to duplicate messages being sent to users. Suggested Fix: Make queue processing exactly-once by storing a processing status flag or using a deduplication store before invoking the delivery provider, and ensure workers acknowledge messages only after successful delivery. Trade-offs: Slight increase in storage and latency for the extra write/check before delivery.",
+  "recommendation": "Make queue processing exactly-once by storing a processing status flag or using a deduplication store before invoking the delivery provider, and ensure workers acknowledge messages only after successful delivery."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "low",
+  "title": "Insufficient protection against delivery provider overload",
+  "quote": "If the primary delivery provider is down for more than two minutes, workers switch to the backup provider.",
+  "description": "Switching providers only after a fixed 2-minute outage window lacks a circuit-breaker pattern; rapid retries during a transient failure can flood the provider and exacerbate the outage.",
+  "recommendation": "Introduce a circuit-breaker with failure thresholds and exponential back-off that temporarily pauses retries and routes traffic to the backup provider sooner when error rates exceed a configurable limit."
+ },
+ {
+  "agent": "Reliability",
+  "severity": "low",
+  "title": "Latency alert threshold exceeds service goal",
+  "quote": "Alerts page the on-call engineer when latency passes 30 seconds or failures pass 2 percent.",
+  "description": "The SLA aims for 95 % of messages within 10 seconds, yet alerts only fire at 30 seconds, potentially allowing degraded performance to go unnoticed for a long period.",
+  "recommendation": "Add a warning alert at 12–15 seconds and keep the critical alert at 30 seconds to detect early latency drift."
+ }
+]

@@ -52,7 +52,6 @@ Report 3 to 6 findings, most severe first. Stay within your focus areas.
 Every finding must include a verbatim 'quote' directly from the RFC text: the sentence that shows the problem.
 Read the whole RFC before you report something as missing. If the RFC already states a safeguard for a concern, do not report that concern.
 Only report real weaknesses. Fewer, correct findings are better than many doubtful ones.
-If the RFC itself says something is undecided or still an open question, report that as a finding.
 
 @@SEVERITY_GUIDE@@"""
 ANALYSIS_FORMAT = ANALYSIS_FORMAT.replace("@@SEVERITY_GUIDE@@", SEVERITY_GUIDE)
@@ -115,6 +114,11 @@ def _findings_block(findings: list[dict]) -> str:
     return json.dumps(findings, indent=1)
 
 
+OPEN_QUESTION_NOTE = (
+    "If the RFC itself says something is undecided or still an open question, report that as a finding.\n"
+)
+
+
 def build_analysis_messages(spec: AgentSpec, project: str, parsed: ParsedRFC, max_chars: int) -> list[dict]:
     missing = parsed.missing_sections
     gap_note = (
@@ -125,6 +129,8 @@ def build_analysis_messages(spec: AgentSpec, project: str, parsed: ParsedRFC, ma
         f"Project: {project}\nRFC title: {parsed.title}\n{gap_note}\n"
         f"--- RFC START ---\n{parsed.to_prompt_text(max_chars)}\n--- RFC END ---\n\n"
         f"{ANALYSIS_FORMAT}"
+        # One agent reports open questions, so that five agents do not each report the same one.
+        + (f"\n{OPEN_QUESTION_NOTE}" if spec.name == "Architecture Agent" else "")
     )
     return [{"role": "system", "content": spec.system_prompt}, {"role": "user", "content": user}]
 
@@ -259,25 +265,28 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b) if (a | b) else 0.0
 
 
+def _topic(f) -> set[str]:
+    return _tokens(f"{f.title} {f.description} {f.recommendation}")
+
+
 def find_duplicate(new, existing: list) -> int | None:
     """Index of the finding in `existing` that says the same thing as `new`, or None.
 
-    Two findings are the same when they share one RFC quote and talk about the same fix (many different
-    problems quote the same sentence, so the quote alone is not enough), or when their titles are nearly
-    identical. Tuned on a real review of 19 findings: the two real duplicates scored 0.23 and 0.26 on the
-    shared-quote test, the closest pair of different problems that shared a quote scored 0.05, and no pair of
-    different problems scored above 0.25 on titles alone.
+    Two findings are the same when they share one RFC quote and describe the same problem and fix (many
+    different problems quote the same sentence, so the quote alone is not enough), or when their titles are
+    nearly identical. Tuned on 33 real findings from two reviews: the pairs of true duplicates that shared a
+    quote scored 0.19 to 0.23 on the topic test, the closest pair of different problems that shared a quote
+    scored 0.09, and no pair of different problems scored above 0.25 on titles alone.
     """
     new_quote = " ".join(re.sub(r"[^a-z0-9 ]", " ", (new.quote or "").lower()).split())
     new_title = _tokens(new.title)
-    new_title_rec = _tokens(f"{new.title} {new.recommendation}")
+    new_topic = _topic(new)
     for i, other in enumerate(existing):
         if _jaccard(new_title, _tokens(other.title)) >= 0.6:
             return i
         other_quote = " ".join(re.sub(r"[^a-z0-9 ]", " ", (other.quote or "").lower()).split())
-        if new_quote and new_quote == other_quote:
-            if _jaccard(new_title_rec, _tokens(f"{other.title} {other.recommendation}")) >= 0.15:
-                return i
+        if new_quote and new_quote == other_quote and _jaccard(new_topic, _topic(other)) >= 0.14:
+            return i
     return None
 
 

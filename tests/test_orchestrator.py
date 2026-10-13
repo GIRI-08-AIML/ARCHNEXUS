@@ -257,5 +257,6 @@ def test_duplicate_findings_from_two_agents_are_merged(db):
     assert len(same) == 1  # one row, not two
     assert len(findings) == 4  # three other agents + the merged finding
     assert "Also flagged by the" in same[0].description
+    assert '"No circuit breaker on the payment provider"' in same[0].description  # the merged title stays visible
     assert same[0].severity == "high"  # the higher of the two ratings wins
     assert "1 duplicate finding merged" in db.scalar(select(FinalReport)).summary

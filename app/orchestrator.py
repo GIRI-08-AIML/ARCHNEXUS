@@ -222,7 +222,9 @@ class ReviewOrchestrator:
                         first = accepted[dup]
                         logger.info("Merging '%s' from %s into '%s'", d.title, name, first["draft"].title)
                         self.merged.append({"agent": name, "title": d.title, "into": first["draft"].title})
-                        first["row"].description = f"{first['row'].description}\n\nAlso flagged by the {name}."
+                        first["row"].description = (
+                            f"{first['row'].description}\n\nAlso flagged by the {name}: \"{d.title}\"."
+                        )
                         if _RANK[str(d.severity)] > _RANK[str(first["draft"].severity)]:
                             first["row"].severity = d.severity.value
                             first["item"]["severity"] = d.severity.value
