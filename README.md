@@ -1,124 +1,145 @@
-# ArchNexus – Multi-Agent Software Architecture & RFC Review Board
+# ArchNexus: a review board for software architecture RFCs
 
-Submit a project name and an RFC; a virtual review board of local LLM agents analyses it,
-debates conflicting opinions, and a Judge Agent issues a final decision.
+Paste or upload an RFC. Five specialist AI agents (Architecture, Security, Database, Scalability, Reliability) read it, check each other's work, argue about conflicting advice, and a Judge issues a verdict, a score and a list of changes. Every finding quotes the sentence of the RFC it is about.
 
 ```
-RFC → Parser → Agent Orchestrator → Specialized Agents → Debate → Judge Agent → Final Report → PostgreSQL → FastAPI API
+RFC -> Parser -> 5 specialists (in parallel) -> quote check -> evidence check -> merge duplicates
+    -> debate -> Judge -> score rules -> report -> PostgreSQL -> FastAPI + web app + VS Code extension
 ```
 
-**Stack:** Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, PostgreSQL, Ollama (Qwen3), Uvicorn, Pytest.
+**Stack:** Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, PostgreSQL, pytest. The model is a local one through Ollama, or a hosted one through any OpenAI-compatible API (for example Groq). The web app is plain HTML, CSS and JavaScript with no build step.
+
+## What it does
+
+- Reviews an RFC (pasted, or uploaded as .pdf, .docx, .md or .txt) and shows the verdict, findings by severity, the debate and the RFC itself.
+- Drops findings the RFC already answers, and lowers severities the RFC does not justify.
+- Accounts for people and companies, workspaces with owner, reviewer and viewer roles, comments and a status workflow on each finding, RFC versions with a comparison between reviews.
+- Exports a review as Markdown or PDF.
+- A VS Code extension reviews the open file and puts each finding on the line it is about.
 
 ## Quick start
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env                 # then edit it, see "Configuration"
 
 docker compose up -d                 # PostgreSQL
-ollama pull qwen3:8b                 # local model (change OLLAMA_MODEL to use another size)
-alembic upgrade head                 # create tables
-uvicorn app.main:app --reload        # http://localhost:8000/docs
-pytest                               # tests use a fake LLM + SQLite, no services needed
+alembic upgrade head                 # create the tables
+uvicorn app.main:app --reload        # web app at http://localhost:8000, API docs at /docs
 ```
+
+Choose a model in `.env`:
+
+- **Local (free, private, slow on a laptop):** `ollama pull qwen3:8b`, then keep `LLM_PROVIDER=ollama`. Small models (for example `qwen3:1.7b`) give poor reviews.
+- **Hosted (fast):** set `LLM_PROVIDER=groq`, `LLM_API_KEY`, `LLM_MODEL` and `LLM_BASE_URL`. Model names change, so check the provider's list. A free plan allows few calls per minute: use `MAX_SPECIALIST_CONCURRENCY=2` or `1`.
+
+Before you share the app with anyone, set `SECRET_KEY` to a long random value:
+`python -c "import secrets; print(secrets.token_urlsafe(48))"`
+
+## Configuration
+
+All settings are environment variables, or lines in `.env`. `.env.example` lists every one with comments.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `DATABASE_URL` | local PostgreSQL | Where reviews are stored |
+| `SECRET_KEY` | `change-me` | Signs login tokens. Change it. |
+| `LLM_PROVIDER` | `ollama` | `ollama`, or `groq` / `openai` for a hosted API |
+| `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | Groq | Hosted model settings |
+| `OLLAMA_MODEL` | `qwen3:8b` | Local model |
+| `MAX_SPECIALIST_CONCURRENCY` | `5` | Agents running at once. Lower it on free cloud plans. |
+| `MAX_RFC_CHARS_IN_PROMPT` | `12000` | How much of the RFC the model reads (about 4 pages) |
+| `DEBATE_ROUNDS` | `1` | Rounds of agents answering each other |
+| `VERIFY_FINDINGS` | `true` | The evidence check below. One extra model call per finding. |
+| `LLM_RATE_LIMIT_RETRIES`, `LLM_RATE_LIMIT_MAX_WAIT` | `6`, `60` | How the app waits when the provider says "429 Too Many Requests" |
+| `LOGIN_MAX_FAILURES`, `LOGIN_IP_MAX_FAILURES`, `LOGIN_LOCKOUT_SECONDS` | `5`, `20`, `900` | Sign-in lockout, see "Security" |
+
+## How a review works
+
+1. **Parser** (`app/parser.py`) splits the RFC by Markdown headings into sections and notes the ones the RFC never covers.
+2. **Specialists** (`app/orchestrator.py`) run in parallel threads. Each follows a strict severity guide: most findings are medium or low, and most RFCs have no critical finding. Each finding must quote the RFC.
+3. **Quote check.** A finding whose quote is not in the RFC is discarded, so the models cannot invent evidence.
+4. **Evidence check.** One short model call per finding asks: does the RFC already answer this, or say the opposite? If so, the verifier must copy the proving sentence word for word. If it cannot, or if the call fails, the finding is kept. The same call can lower a severity (when the RFC already partly covers the concern, or the problem only appears if you assume something the RFC does not say) but never raise one.
+5. **Merge duplicates.** When two agents report the same problem, one finding is kept with the higher rating and a line "Also flagged by the ... Agent". Findings that only quote the same sentence for different problems are not merged. Only the Architecture Agent reports open questions the RFC states.
+6. **Debate.** Each agent sees the others' findings and agrees, disagrees or refines. The transcript is stored.
+7. **Judge and score rules.** The Judge gives a decision, score and summary, and is told to call only findings rated critical or high high-severity. Rules in code then cap the score (3 or more critical: 25 at most, 2: 40, 1: 60, 3 or more high: 70, any high: 85) and add exact severity counts to the summary, so a verdict cannot contradict its findings.
+
+The summary says what the checks did: how many findings were removed, how many severities lowered, how many duplicates merged, and whether any finding could not be checked because the model did not answer ("Evidence check incomplete").
+
+**Resilience.** Malformed model JSON is retried. One failing agent does not fail the review. If the Judge fails, a rule-based verdict is stored. Provider rate limits are waited out: the app uses the wait the provider asks for, or backs off 5, 10, 20 ... seconds. A wait longer than a minute usually means a daily limit, so the call then fails with a clear message. Error messages include what the provider said, so a retired model name shows as "model does not exist" instead of a bare 404.
 
 ## Using the API
 
+Sign in first (`POST /auth/register` or `POST /auth/login`), then send `Authorization: Bearer <access_token>` on every other call.
+
 ```bash
-# 1. create a project
-curl -X POST localhost:8000/projects -H 'content-type: application/json' \
+curl -X POST localhost:8000/projects -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"name":"Orders","rfc_text":"# Order Service\n## Architecture\n..."}'
-
-# 2. start a review (runs in the background, returns 202 immediately)
-curl -X POST localhost:8000/projects/1/reviews
-
-# 3. poll, then read results
-curl localhost:8000/reviews/1                       # status + findings + debates + report
-curl 'localhost:8000/reviews/1/findings?severity=critical&agent=Security%20Agent'
-curl localhost:8000/reviews/1/debates
-curl localhost:8000/reviews/1/report
+curl -X POST localhost:8000/projects/1/reviews -H "Authorization: Bearer $TOKEN"   # starts a review, returns 202
+curl localhost:8000/reviews/1 -H "Authorization: Bearer $TOKEN"                    # poll: status, findings, debates, report
 ```
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST/GET | `/projects` | create / list projects |
-| POST | `/projects/upload` | upload & extract text (.pdf, .docx, .md, .txt) |
-| GET/PATCH/PUT/DELETE | `/projects/{id}` | fetch / edit RFC / delete |
-| POST/GET | `/projects/{id}/reviews` | start / list reviews |
-| GET | `/reviews/{id}` | full review (findings, debates, report, comparison) |
-| GET | `/reviews/{id}/comparison` | compare findings with previous review |
-| GET | `/reviews/{id}/export/markdown` | export review report as Markdown file |
-| GET | `/reviews/{id}/export/pdf` | export review report as PDF document |
-| GET | `/reviews/{id}/findings` | filter by `severity`, `agent` |
-| PATCH/PUT | `/reviews/{id}/findings/{fid}` | update status (Open, Accepted, Rejected w/ reason, Fixed) |
-| POST/GET | `/reviews/{id}/findings/{fid}/comments` | post / list comments on a finding |
-| GET | `/organizations/me` | list user workspaces/organizations |
-| GET | `/organizations/{id}/members` | list organization members and roles |
-| POST | `/organizations/{id}/invites` | invite team member by email (owner, reviewer, viewer) |
-| GET | `/reviews/{id}/debates` | debate transcript |
-| GET | `/reviews/{id}/report` | final decision (409 until ready) |
-| GET | `/agents` | the board members |
+| POST | `/auth/register`, `/auth/login` | Create an account / sign in |
+| GET | `/auth/me` | The signed-in user |
+| POST/GET | `/projects` | Create / list projects |
+| POST | `/projects/upload` | Upload and extract text (.pdf, .docx, .md, .txt) |
+| GET/PATCH/PUT/DELETE | `/projects/{id}` | Fetch / edit the RFC / delete |
+| POST/GET | `/projects/{id}/reviews` | Start / list reviews |
+| GET | `/reviews` | List your reviews |
+| GET | `/reviews/{id}` | Full review: findings, debates, report, comparison |
+| GET | `/reviews/{id}/comparison` | Compare findings with the previous review |
+| GET | `/reviews/{id}/findings` | Filter by `severity`, `agent` |
+| PATCH/PUT | `/reviews/{id}/findings/{fid}` | Set status: open, accepted, rejected (with a reason), fixed |
+| POST/GET | `/reviews/{id}/findings/{fid}/comments` | Comment on a finding |
+| GET | `/reviews/{id}/debates`, `/reviews/{id}/report` | Debate transcript / final decision |
+| GET | `/reviews/{id}/export/markdown`, `/export/pdf` | Download the report |
+| GET | `/organizations/me`, `/organizations/{id}/members` | Workspaces and members |
+| POST | `/organizations/{id}/invites` | Invite a member as owner, reviewer or viewer |
+| GET | `/agents` | The board members |
 
-## How it works
+## Accounts, workspaces and security
 
-1. **Parser** (`app/parser.py`) splits the RFC by Markdown headings into canonical sections
-   (security, data, scalability, …) and flags sections the RFC never covers.
-2. **Orchestrator** (`app/orchestrator.py`) – plain Python, no framework – runs the stages:
-   - **Parallel Specialist Analysis:** Specialists (Architecture, Security, Database, Scalability, Reliability) run concurrently using a thread pool bounded by `MAX_SPECIALIST_CONCURRENCY` (default 5).
-   - **Verbatim Quoted RFC Evidence:** Every specialist finding requires an exact quoted passage from the RFC. Findings with missing or hallucinated passages not present in the RFC are strictly discarded.
-   - **Debate rounds** (`DEBATE_ROUNDS`): every agent sees the others' findings and agrees, disagrees or refines; the transcript is stored and fed to the next round.
-   - the **Judge Agent & Guardrails:** weighs findings + debate and returns decision / score / summary / recommendations / key risks. Guardrails deterministically enforce score caps (3+ criticals <= 25, 2 criticals <= 40, 1 critical <= 60, 3+ highs <= 70, 1+ highs <= 85) and prepend a factual severity audit summary so verdicts never contradict evidence.
-3. **Resilience & Providers:** malformed LLM JSON is retried; invalid individual findings are skipped; one agent failing does not abort the review; if the Judge fails a heuristic verdict is stored. Supports local Ollama models or hosted OpenAI-compatible APIs (e.g. Groq with `llama-3.3-70b-versatile`).
+- A person registers with a name, email, password and an optional company. Passwords are hashed with scrypt, and sign-in returns a signed token valid for `TOKEN_EXPIRE_MINUTES` (default 7 days).
+- Projects and reviews belong to the account that made them. Other accounts get "not found". Workspaces have owners (full control), reviewers (edit RFCs, start reviews, change statuses) and viewers (read and comment).
+- **Sign-in lockout.** After 5 wrong passwords for one account from one address, further attempts get "429 Too many failed sign-in attempts" for 15 minutes, even with the right password. 20 failures from one address across any accounts also lock that address. A stranger cannot lock you out from another address. The counters live in the server's memory: they reset on a restart, and each server process counts separately. Behind a reverse proxy, make sure it passes the real client address.
+- **Privacy.** The RFC text is sent to whichever model you configure. With a hosted provider, that is a third party. Use a local model for confidential RFCs.
+- Not built yet: password reset, email verification, per-user usage limits.
 
-## Workspaces & Collaboration
+After pulling changes that touch the database, run `pip install -r requirements.txt` and `alembic upgrade head`.
 
-- Users belong to organizations with role-based permissions (`owner`, `reviewer`, `viewer`).
-- Invite team members by email with granular access control.
-- Viewers have read-only access with interactive per-finding commenting.
-- Reviewers and owners can edit RFCs, launch re-reviews, and update finding statuses.
+## VS Code extension
 
-## Database
+The `vscode-extension/` folder holds an extension that reviews the file you are editing. See its [README](vscode-extension/README.md). In short: start the server, install the `.vsix`, run **ArchNexus: Review this RFC**, and each finding appears in the Problems panel on the line of the RFC it quotes.
 
-`projects` 1─* `reviews` 1─* `findings`, `debates`; `reviews` 1─1 `final_reports`;
-`agents` referenced by `findings` and `debates` (speaker + target). Schema is managed by Alembic
-(`alembic/versions/0001_initial_schema.py`).
+## Testing
 
-## Adding LangGraph later
+```bash
+pytest                         # about 85 tests; they use a fake model and SQLite, so no services are needed
+python scripts/check_verifier.py   # runs the evidence check against YOUR model: 8 cases, a good model scores 8/8
+cd vscode-extension && npm test    # the extension's helper tests (needs Node 20 or newer)
+```
 
-Agents only talk to the `LLMClient` protocol (`app/llm.py`) and the stage functions in
-`app/agents/base.py`. To move to LangGraph, make each stage (`_analysis_round`, `_debate_rounds`,
-`_judge`) a graph node that calls the same `run_*` functions – persistence and API stay unchanged.
+`check_verifier.py` matters: the evidence check is only as good as the model behind it. A tiny model may fail it. If the model does not answer (for example a rate limit), the script reports those cases as errors instead of passes.
 
-## Frontend
+## Project layout
 
-Start the server and open <http://127.0.0.1:8000/>. The UI lives in `frontend/` (plain HTML, CSS and JS, no build step) and is served by FastAPI under `/ui`. You can start a review, watch it progress live, and read the verdict, findings, debate and RFC. `GET /reviews` lists recent reviews. API docs stay at `/docs`.
+```
+app/              FastAPI app: routers/, orchestrator.py, agents/, llm.py, parser.py, exports.py, security, login_limiter.py
+alembic/          database migrations
+frontend/         the web app (served by FastAPI)
+scripts/          check_verifier.py
+tests/            pytest suite (tests/fixtures holds findings from two real reviews)
+vscode-extension/ the VS Code extension
+```
 
-## Accounts
+Database: `projects` 1-* `reviews` 1-* `findings`, `debates`; `reviews` 1-1 `final_reports`; `agents` referenced by findings and debates. Schema changes are Alembic migrations.
 
-Each person registers with a name, email, password and an optional company name. Projects and reviews belong to the account that created them, and other accounts get "not found" for them. Passwords are hashed with scrypt, and sign-in returns a signed token valid for `TOKEN_EXPIRE_MINUTES` (default 7 days).
+## Known limits
 
-Set `SECRET_KEY` in `.env` to a long random value before sharing the app. The default value lets anyone forge a login token.
-
-After pulling this change:
-
-    pip install -r requirements.txt
-    alembic upgrade head
-
-Projects created before accounts existed stay in the database but belong to nobody, so no one can see them.
-
-API use: `POST /auth/register` or `POST /auth/login`, then send `Authorization: Bearer <access_token>` on every other call.
-
-## Evidence check
-
-After the specialists write their findings, a second pass checks each one against the RFC. A finding is removed when the RFC already contains the safeguard it says is missing, or states the opposite of what the finding claims. The verifier must copy the proving sentence word for word from the RFC, and if it cannot, or if the call fails, the finding is kept. The final summary says how many findings were removed. Removed findings never reach the debate, the score caps or the report.
-
-- Turn it off with `VERIFY_FINDINGS=false` in `.env`.
-- It adds one short model call per finding. With a local model that adds a few minutes, with a cloud model a few seconds.
-- To see how well your model does this job, run `python scripts/check_verifier.py`. A good model scores 8/8. A tiny model (for example `qwen3:1.7b`) may not. If the model does not answer (for example a rate limit), the script reports those cases as errors instead of counting them as passes.
-- **Severity.** The specialists are given a strict guide for what critical, high, medium and low mean (most RFCs have no critical finding). The same check can also lower a finding's severity, for example when the RFC already partly covers the concern. It can never raise one. The summary says how many ratings were lowered. If the check cannot run, the original rating stays.
-- **Duplicates.** When two agents report the same problem (they share an RFC quote and describe the same problem and fix, or their titles are nearly identical), one finding is kept with the higher rating and a line `Also flagged by the ... Agent: "<its title>"`, so a wrong merge is easy to spot. Only the Architecture Agent is asked to report open questions the RFC states, so that five agents do not each report the same one. The summary says how many were merged. Findings that merely quote the same sentence for different problems are not merged.
-- **Summary wording.** The Judge is given the list of findings rated critical or high and told to call only those high-severity, to use "may" for risks the RFC does not confirm, and not to repeat the counts (the app adds exact counts itself).
-- **Rate limits.** Free cloud plans (Groq, for example) answer "429 Too Many Requests" when too many calls arrive in a minute. The app waits for the time the provider asks for (or backs off 5, 10, 20 ... seconds) and tries again, up to `LLM_RATE_LIMIT_RETRIES` times (default 6). A wait longer than `LLM_RATE_LIMIT_MAX_WAIT` seconds (default 60) usually means a daily limit, so the call fails at once with a clear message. If it keeps happening, set `MAX_SPECIALIST_CONCURRENCY=1`.
-- If a finding could not be checked because the model did not answer, it is kept and the report summary says "Evidence check incomplete: N findings could not be checked". Run the review again once the limit has reset.
-- Cloud error messages now include what the provider said, so a retired model name shows up as "model does not exist" instead of a bare 404.
+- Only the first `MAX_RFC_CHARS_IN_PROMPT` characters of an RFC are read (about 4 pages by default).
+- Reviews run inside the web server process. A restart marks running reviews as failed, and there is no job queue.
+- The model is an AI reviewer: scores vary a few points between runs of the same RFC, and some findings are judgment calls. Treat it as a second opinion.
+- Free hosted plans limit tokens per minute and per day, so a review can take several minutes and only a few fit in a day.

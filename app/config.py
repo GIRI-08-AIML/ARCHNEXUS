@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # LLM configuration (ollama or openai/groq)
     llm_provider: str = "ollama"  # "ollama" or "openai"
     llm_api_key: str = ""
-    llm_model: str = "llama-3.3-70b-versatile"
+    llm_model: str = "openai/gpt-oss-120b"
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
     ollama_base_url: str = "http://localhost:11434"
@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # The client then waits (using the provider's Retry-After when given) and tries again.
     llm_rate_limit_retries: int = 6
     llm_rate_limit_max_wait: float = 60.0  # seconds; a longer wait (e.g. a daily limit) is not waited out
+
+    # Failed sign-ins: after this many wrong passwords the caller must wait for the lockout to pass.
+    login_max_failures: int = 5  # per account, from one client address
+    login_ip_max_failures: int = 20  # per client address, across all accounts
+    login_lockout_seconds: int = 15 * 60
 
     secret_key: str = "change-me"
     token_expire_minutes: int = 60 * 24 * 7

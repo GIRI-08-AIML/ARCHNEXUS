@@ -1,0 +1,78 @@
+RFC-002: Notification Service
+Author: Messaging Team | Status: In review | Date: 2026-10-09
+
+1. Overview
+Today each product team sends its own emails and push messages with its own code. We
+propose one shared notification service that accepts a request from any internal service, applies
+user preferences, and delivers it by email, SMS or push. This removes duplicated code and lets us
+enforce one set of rules for opt-outs and quiet hours.
+
+2. Goals and Non-Goals
+- Deliver 95 percent of messages within 10 seconds of the request, at up to 2,000 messages per
+
+second.
+- Never send a message to a user who has opted out.
+- Never send the same message twice when a caller retries.
+- Non-goal: marketing campaign tooling and message templates editing UI.
+
+3. Architecture
+Callers send a request to the Notification API, which validates it, stores it in PostgreSQL, and puts
+a job on a durable queue. Stateless worker processes read jobs from the queue, check the user
+preferences, render the template, and call the delivery provider. The API and the workers are
+deployed as separate services, each with at least three instances spread across two availability
+zones.
+Component
+
+Responsibility
+
+Scaling
+
+Notification API
+
+Validate, store, enqueue
+
+Horizontal, behind a load balancer
+
+Worker
+
+Render and deliver
+
+Horizontal, scaled on queue depth
+
+PostgreSQL
+
+Requests, preferences, audit
+
+Primary with two read replicas
+
+4. Data Storage
+Requests and delivery attempts are stored in PostgreSQL. Each request carries a caller-supplied
+idempotency key with a unique index, so a retry returns the original result instead of sending again.
+We index requests by user id and created time. Rows older than 90 days are moved to cheaper
+archive storage. User contact details are encrypted at rest.
+
+5. Security
+Services authenticate to the API with short-lived tokens that expire after 15 minutes and are
+renewed automatically. All traffic uses TLS, including calls inside the cluster. Each calling service
+has its own credentials and may only send the message types it was granted. Every request is
+written to an audit log. The API enforces a per-caller rate limit.
+
+6. Reliability
+
+Delivery calls use a 5 second timeout and up to five retries with exponential backoff. Messages that
+still fail go to a dead-letter queue, and an alert fires when it is not empty. If the primary delivery
+provider is down for more than two minutes, workers switch to the backup provider. The database
+takes a nightly backup and continuous log archiving, and we test a restore every quarter.
+
+7. Observability
+We track queue depth, delivery latency, failure rate by provider, and dead-letter count on a
+dashboard. Alerts page the on-call engineer when latency passes 30 seconds or failures pass 2
+percent.
+
+8. Rollout
+We will migrate one product team at a time, starting with a low-risk internal tool. Each team runs
+the old and new paths side by side for two weeks, and we compare the results before switching.
+Rollback is a single configuration flag per team. Open question: how we handle time zones for
+quiet hours is not yet decided.
+
+

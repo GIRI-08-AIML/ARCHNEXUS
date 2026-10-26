@@ -102,6 +102,16 @@ class FakeLLM:
         raise AssertionError(f"unexpected task {task}")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_login_limiter():
+    """Failed-login counters live in memory, so start every test with a clean slate."""
+    from app.login_limiter import login_limiter
+
+    login_limiter.clear()
+    yield
+    login_limiter.clear()
+
+
 @pytest.fixture
 def session_factory():
     engine = create_engine(

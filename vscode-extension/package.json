@@ -1,0 +1,80 @@
+{
+  "name": "archnexus",
+  "displayName": "ArchNexus RFC Review",
+  "description": "Review the RFC you are writing with five specialist AI agents and a judge, without leaving VS Code.",
+  "version": "0.2.0",
+  "publisher": "archnexus",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "archnexus.reviewRfc",
+        "title": "Review this RFC",
+        "category": "ArchNexus"
+      },
+      {
+        "command": "archnexus.signIn",
+        "title": "Sign in",
+        "category": "ArchNexus"
+      },
+      {
+        "command": "archnexus.register",
+        "title": "Create an account (opens browser)",
+        "category": "ArchNexus"
+      },
+      {
+        "command": "archnexus.signOut",
+        "title": "Sign out",
+        "category": "ArchNexus"
+      },
+      {
+        "command": "archnexus.clearProblems",
+        "title": "Clear review problems",
+        "category": "ArchNexus"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "archnexus.reviewRfc",
+          "when": "editorLangId == markdown || editorLangId == plaintext",
+          "group": "navigation@9"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "archnexus.reviewRfc",
+          "when": "editorLangId == markdown || editorLangId == plaintext",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ArchNexus",
+      "properties": {
+        "archnexus.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Address of your ArchNexus server."
+        },
+        "archnexus.showProblems": {
+          "type": "boolean",
+          "default": true,
+          "description": "List the findings in the Problems panel after a review."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.dependencies import get_current_user, get_db
+from app.login_limiter import login_limiter
 from app.models import User
 from app.schemas import LoginRequest, RegisterRequest, TokenResponse, UserRead
 from app.security import create_access_token, hash_password, verify_password
@@ -40,11 +42,32 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == payload.email.strip().lower()))
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    cfg = get_settings()
+    ip = request.client.host if request.client else "unknown"
+    email = payload.email.strip().lower()
+
+    wait = login_limiter.blocked_for(
+        ip,
+        email,
+        max_per_account=cfg.login_max_failures,
+        max_per_ip=cfg.login_ip_max_failures,
+        window=cfg.login_lockout_seconds,
+    )
+    if wait:
+        minutes = max(1, round(wait / 60))
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Too many failed sign-in attempts. Try again in {minutes} minute{'s' if minutes != 1 else ''}.",
+            headers={"Retry-After": str(wait)},
+        )
+
+    user = db.scalar(select(User).where(User.email == email))
     ok = verify_password(payload.password, user.password_hash if user else None)
     if not user or not ok:
+        login_limiter.record_failure(ip, email, window=cfg.login_lockout_seconds)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect email or password.")
+    login_limiter.reset(ip, email)
     return TokenResponse(access_token=create_access_token(user.id), user=user)
 
 
