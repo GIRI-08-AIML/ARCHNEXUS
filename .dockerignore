@@ -1,0 +1,10 @@
+.git
+.venv
+.env
+__pycache__
+*.pyc
+.pytest_cache
+vscode-extension
+tests
+*.vsix
+.DS_Store

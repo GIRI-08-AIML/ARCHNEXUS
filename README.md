@@ -127,6 +127,26 @@ After pulling changes that touch the database, run `pip install -r requirements.
 
 The `vscode-extension/` folder holds an extension that reviews the file you are editing. See its [README](vscode-extension/README.md). In short: start the server, install the `.vsix`, run **ArchNexus: Review this RFC**, and each finding appears in the Problems panel on the line of the RFC it quotes.
 
+## Deploying
+
+A free setup that gives you a public HTTPS link: **Neon** for the database and **Render** for the app. The Dockerfile and `render.yaml` in this repo do the rest.
+
+1. **Database (Neon, free, no card).** Sign up at neon.com, create a project, and copy the connection string. Use the **direct** connection (the host has no `-pooler` in it). It looks like `postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require`. The app adds the driver name itself.
+2. **Groq key.** Create one at console.groq.com (a new key, not the one you used locally).
+3. **App (Render).** Sign up at render.com with GitHub, choose **New > Blueprint**, and pick this repository. Render reads `render.yaml`. When asked, paste `DATABASE_URL` (step 1) and `LLM_API_KEY` (step 2). `SECRET_KEY` is generated for you.
+4. Wait for the build. On every start the container runs `alembic upgrade head` and then the server, so tables are created and updated automatically. Open the `https://<name>.onrender.com` link, create an account, and run a review.
+5. **VS Code extension.** In VS Code open Settings, search for `ArchNexus`, and set **Server Url** to your Render link.
+
+What to expect on the free plans (checked October 2026, so confirm on the providers' pages):
+
+- Render's free web service **sleeps after 15 minutes without traffic** and takes about a minute to wake, and it has 750 instance hours per month. A review that is running keeps the app awake only while you keep the page open or poll it.
+- Render's own free Postgres expires after 30 days, which is why this guide uses Neon. Neon's free plan is permanent, with 1 GB of storage and compute that suspends after 5 minutes idle (the first request after that is a little slower).
+- Groq's free limits still apply, so use `MAX_SPECIALIST_CONCURRENCY=2` (already set in `render.yaml`).
+- Run **one** server process. The sign-in lockout, the question limit and running reviews live in that process's memory.
+- The container starts uvicorn with `--proxy-headers`, so each visitor is limited by their own address and not by Render's proxy.
+
+To run the same image locally: `docker build -t archnexus .` then `docker run -p 8000:8000 --env-file .env archnexus`.
+
 ## Testing
 
 ```bash

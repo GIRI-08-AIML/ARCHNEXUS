@@ -128,3 +128,11 @@ def test_other_errors_still_use_the_normal_retry_count(monkeypatch):
         client.chat_json([{"role": "user", "content": "hi"}])
     assert len(calls) == 3  # 1 try + 2 retries, like before
     assert sleeps == [OpenAICompatibleClient.RETRY_DELAY_SECONDS] * 3
+
+
+def test_hosted_postgres_urls_get_the_driver_added():
+    for given in ("postgres://u:p@host/db?sslmode=require", "postgresql://u:p@host/db?sslmode=require"):
+        assert Settings(_env_file=None, database_url=given).database_url == "postgresql+psycopg://u:p@host/db?sslmode=require"
+    assert Settings(_env_file=None, database_url="sqlite://").database_url == "sqlite://"
+    already = "postgresql+psycopg://u:p@host/db"
+    assert Settings(_env_file=None, database_url=already).database_url == already

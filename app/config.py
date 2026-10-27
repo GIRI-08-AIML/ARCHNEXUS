@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,6 +8,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://archnexus:archnexus@localhost:5432/archnexus"
+
+    @field_validator("database_url")
+    @classmethod
+    def _use_psycopg_driver(cls, v: str) -> str:
+        """Hosting providers give 'postgres://...' or 'postgresql://...'; SQLAlchemy needs the driver named."""
+        for prefix in ("postgres://", "postgresql://"):
+            if v.startswith(prefix):
+                return "postgresql+psycopg://" + v[len(prefix):]
+        return v
 
     # LLM configuration (ollama or openai/groq)
     llm_provider: str = "ollama"  # "ollama" or "openai"
