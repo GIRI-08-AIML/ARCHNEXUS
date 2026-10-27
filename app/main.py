@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app.database import SessionLocal
 from app.orchestrator import fail_interrupted_reviews, seed_agents
 from app.config import get_settings
-from app.routers import auth, organizations, projects, reviews
+from app.routers import auth, chat, organizations, projects, reviews
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ app.include_router(auth.router)
 app.include_router(organizations.router)
 app.include_router(projects.router)
 app.include_router(reviews.router)
+app.include_router(chat.router)
 
 
 

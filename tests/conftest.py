@@ -48,13 +48,35 @@ class FakeLLM:
     """Deterministic stand-in for Ollama. Dispatches on the TASK marker in the prompt."""
 
     def __init__(self, fail_judge: bool = False, fail_all: bool = False, verify_rules: dict | None = None,
-                 fail_verify: bool = False):
+                 fail_verify: bool = False, fail_chat: bool = False):
         self.fail_judge = fail_judge
         self.fail_all = fail_all
         self.fail_verify = fail_verify
+        self.fail_chat = fail_chat
+        self.chat_prompts: list = []
         # finding title -> verifier answer; any finding not listed is judged valid
         self.verify_rules = verify_rules or {}
         self.calls: list[str] = []
+
+    def chat_text(self, messages):
+        """Answers a chat question. Cites the last finding id found in the prompt, plus one made-up id."""
+        import re
+
+        self.calls.append("TASK: CHAT")
+        self.chat_prompts.append(messages)
+        if self.fail_chat:
+            raise LLMError("chat down")
+        ids = re.findall(r"\[#(\d+)\]", messages[0]["content"])
+        cite = f" [#{ids[-1]}]" if ids else ""
+        answer = f"The review flagged this{cite}. Also see [#999999]."
+        if ids and "reject" in messages[-1]["content"].lower():
+            answer += f" I suggest dismissing it. [[propose #{ids[-1]} rejected: out of scope]] [[propose #999999 fixed]]"
+        return answer
+
+    def stream_text(self, messages):
+        text = self.chat_text(messages)
+        for i in range(0, len(text), 12):
+            yield text[i : i + 12]
 
     def chat_json(self, messages):
         user = messages[-1]["content"]
@@ -107,9 +129,13 @@ def _fresh_login_limiter():
     """Failed-login counters live in memory, so start every test with a clean slate."""
     from app.login_limiter import login_limiter
 
+    from app.rate_window import chat_limiter
+
     login_limiter.clear()
+    chat_limiter.clear()
     yield
     login_limiter.clear()
+    chat_limiter.clear()
 
 
 @pytest.fixture

@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     login_ip_max_failures: int = 20  # per client address, across all accounts
     login_lockout_seconds: int = 15 * 60
 
+    # Questions about a finished review (the "Ask" tab). The review is sent to the model with every
+    # question, so the context is capped to stay inside small token-per-minute limits.
+    chat_max_context_chars: int = 16000  # about 4,000 tokens of findings, report and debate
+    chat_max_rfc_chars: int = 3500  # RFC excerpts that match the question
+    chat_history_messages: int = 8  # earlier messages sent along, so follow-up questions work
+    chat_max_question_chars: int = 1500
+    chat_max_questions_per_hour: int = 30  # per person; 0 turns the limit off
+
     secret_key: str = "change-me"
     token_expire_minutes: int = 60 * 24 * 7
 

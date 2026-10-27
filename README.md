@@ -14,7 +14,9 @@ RFC -> Parser -> 5 specialists (in parallel) -> quote check -> evidence check ->
 - Reviews an RFC (pasted, or uploaded as .pdf, .docx, .md or .txt) and shows the verdict, findings by severity, the debate and the RFC itself.
 - Drops findings the RFC already answers, and lowers severities the RFC does not justify.
 - Accounts for people and companies, workspaces with owner, reviewer and viewer roles, comments and a status workflow on each finding, RFC versions with a comparison between reviews.
+- **Ask tab:** a chat assistant answers questions about a finished review ("What should I fix first?", "Why was this rated high?", "Where did the agents disagree?"). Answers come from that review's report, findings, debate and RFC, and cite the findings they use as clickable chips.
 - Exports a review as Markdown or PDF.
+- A redesigned web app with a score summary, severity bar, colour-coded findings, light and dark mode.
 - A VS Code extension reviews the open file and puts each finding on the line it is about.
 
 ## Quick start
@@ -53,6 +55,7 @@ All settings are environment variables, or lines in `.env`. `.env.example` lists
 | `DEBATE_ROUNDS` | `1` | Rounds of agents answering each other |
 | `VERIFY_FINDINGS` | `true` | The evidence check below. One extra model call per finding. |
 | `LLM_RATE_LIMIT_RETRIES`, `LLM_RATE_LIMIT_MAX_WAIT` | `6`, `60` | How the app waits when the provider says "429 Too Many Requests" |
+| `CHAT_MAX_QUESTIONS_PER_HOUR`, `CHAT_MAX_CONTEXT_CHARS` | `30`, `16000` | Questions per person per hour (0 = no limit) and how much of the review is sent with each question |
 | `LOGIN_MAX_FAILURES`, `LOGIN_IP_MAX_FAILURES`, `LOGIN_LOCKOUT_SECONDS` | `5`, `20`, `900` | Sign-in lockout, see "Security" |
 
 ## How a review works
@@ -98,7 +101,17 @@ curl localhost:8000/reviews/1 -H "Authorization: Bearer $TOKEN"                 
 | GET | `/reviews/{id}/export/markdown`, `/export/pdf` | Download the report |
 | GET | `/organizations/me`, `/organizations/{id}/members` | Workspaces and members |
 | POST | `/organizations/{id}/invites` | Invite a member as owner, reviewer or viewer |
+| GET/POST/DELETE | `/reviews/{id}/chat` | Your conversation about a review / ask a question / clear it |
+| POST | `/reviews/{id}/chat/stream` | Ask a question and receive the answer piece by piece (server-sent events) |
 | GET | `/agents` | The board members |
+
+## Asking questions about a review
+
+Open a finished review and choose **Ask**. Each question sends the model the report, the findings (with the RFC sentence each quotes), the debate, the comparison with the previous review and the RFC sections that match the question, plus your last few messages so follow-ups work. The assistant is told to use only that data, to cite findings as `[#id]`, to label general engineering advice as such, and to say so when the review does not cover something. Citations of findings that do not exist are removed before you see the answer. Large reviews are shortened (least serious and least relevant findings first) to stay inside small token limits.
+
+**Streaming.** The web app shows the answer as it is written. **Suggested changes.** If you ask the assistant to accept, reject or mark a finding as fixed, it explains its suggestion and shows an **Apply** button. Nothing changes until you click it, and your workspace role still decides whether you are allowed to change statuses.
+
+Conversations are private to each person and can be cleared. They need a finished review and cost one model call per question, so on a free hosted plan a question can hit the per-minute limit; the app says so and you ask again.
 
 ## Accounts, workspaces and security
 
@@ -142,4 +155,5 @@ Database: `projects` 1-* `reviews` 1-* `findings`, `debates`; `reviews` 1-1 `fin
 - Only the first `MAX_RFC_CHARS_IN_PROMPT` characters of an RFC are read (about 4 pages by default).
 - Reviews run inside the web server process. A restart marks running reviews as failed, and there is no job queue.
 - The model is an AI reviewer: scores vary a few points between runs of the same RFC, and some findings are judgment calls. Treat it as a second opinion.
+- The assistant can be wrong, like the reviewers: it only sees a trimmed copy of the review, and the question limit lives in server memory.
 - Free hosted plans limit tokens per minute and per day, so a review can take several minutes and only a few fit in a day.

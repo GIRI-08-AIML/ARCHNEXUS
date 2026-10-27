@@ -398,3 +398,40 @@ class ReviewDetail(ReviewRead):
     total_findings: int = 0
     resolved_findings: int = 0
 
+
+# ----------------------------------------------------------------- chat about a review
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("message")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Type a question first.")
+        return v
+
+
+class ChatAction(BaseModel):
+    finding_id: int
+    status: str
+    reason: str | None = None
+
+
+class ChatMessageRead(ORMModel):
+    id: int
+    role: str
+    content: str
+    cited_finding_ids: list[int] = Field(default_factory=list)
+    actions: list[ChatAction] = Field(default_factory=list)
+    created_at: datetime
+
+    @field_validator("cited_finding_ids", "actions", mode="before")
+    @classmethod
+    def _none_is_empty(cls, v):
+        return v or []
+
+
+class ChatExchange(BaseModel):
+    question: ChatMessageRead
+    answer: ChatMessageRead

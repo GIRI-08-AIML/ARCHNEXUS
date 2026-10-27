@@ -47,7 +47,7 @@
         else node.setAttribute(k, v === true ? "" : v);
       });
     }
-    (children || []).forEach(function (c) {
+    [].concat.apply([], children || []).forEach(function (c) {
       if (c === null || c === undefined || c === false) return;
       node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
     });
@@ -78,7 +78,17 @@
     options.headers = Object.assign({}, options.headers);
     if (session) options.headers.Authorization = "Bearer " + session.token;
     return fetch(path, options).then(function (res) {
-      if (res.ok) { setBanner(null); return res.json(); }
+      if (res.ok) { setBanner(null); return res.status === 204 ? null : res.json(); }
+      return failure(res, path);
+    }, function () {
+      var err = new Error("Can't reach the ArchNexus server. Check that it is still running.");
+      err.network = true;
+      throw err;
+    });
+  }
+
+  function failure(res, path) {
+    {
       if (res.status === 401 && path.indexOf("/auth/") !== 0) {
         saveSession(null);
         authNotice = "Your session ended. Please sign in again.";
@@ -96,6 +106,33 @@
         err.status = res.status;
         throw err;
       });
+    }
+  }
+
+  /* POST and read a server-sent-event stream. onEvent gets each parsed event; resolves with the "done" event. */
+  function streamPost(path, payload, onEvent) {
+    var headers = { "Content-Type": "application/json" };
+    if (session) headers.Authorization = "Bearer " + session.token;
+    return fetch(path, { method: "POST", headers: headers, body: JSON.stringify(payload) }).then(function (res) {
+      if (!res.ok) return failure(res, path);
+      var reader = res.body.getReader(), decoder = new TextDecoder(), buf = "", result = null;
+      function pump() {
+        return reader.read().then(function (chunk) {
+          buf += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+          var parts = buf.split("\n\n");
+          buf = parts.pop();
+          parts.forEach(function (block) {
+            var line = block.split("\n").filter(function (l) { return l.indexOf("data:") === 0; })[0];
+            if (!line) return;
+            var ev = JSON.parse(line.slice(5));
+            if (ev.type === "error") throw new Error(ev.message);
+            if (ev.type === "done") result = ev;
+            onEvent(ev);
+          });
+          return chunk.done ? result : pump();
+        });
+      }
+      return pump();
     }, function () {
       var err = new Error("Can't reach the ArchNexus server. Check that it is still running.");
       err.network = true;
@@ -110,6 +147,9 @@
   function agentShort(name) {
     return String(name || "").replace(/\s*agent\s*$/i, "");
   }
+
+  var AGENT_COLORS = { Architecture: "#5e5ce6", Security: "#ff453a", Database: "#30b0c7", Scalability: "#ff9f0a", Reliability: "#34c759", Judge: "#af52de" };
+  function agentColor(name) { return AGENT_COLORS[agentShort(name)] || "#8e8e93"; }
 
   function when(iso) {
     if (!iso) return "";
@@ -318,10 +358,21 @@
     render([
       el("div", { class: "wrap" }, [
         el("section", { class: "hero" }, [
-          el("h1", { text: "Review your design before you build it." }),
-          el("p", { text: "Five specialist agents read your RFC, argue it out, and a judge gives the verdict." })
+          el("span", { class: "eyebrow", text: "AI architecture review board" }),
+          el("h1", {}, ["Review your design ", el("span", { class: "grad", text: "before you build it." })]),
+          el("p", { text: "Five specialist agents read your RFC, argue it out, and a judge gives the verdict. Then ask the assistant anything about it." })
         ]),
-        el("div", { class: "card" }, [form]),
+        el("div", { class: "card card-lift" }, [form]),
+        el("div", { class: "how" }, [
+          ["1", "Paste your RFC", "Write it or upload a PDF, Word or Markdown file."],
+          ["2", "Specialists review", "Architecture, Security, Database, Scalability and Reliability each find problems and quote your RFC."],
+          ["3", "Agents debate", "They check each other's findings, and weak ones are dropped."],
+          ["4", "Verdict and Q&A", "Get a score and a fix list, then ask the assistant why."]
+        ].map(function (s) {
+          return el("div", { class: "how-step" }, [
+            el("span", { class: "how-n", text: s[0] }), el("h3", { text: s[1] }), el("p", { text: s[2] })
+          ]);
+        })),
         recent
       ])
     ]);
@@ -374,11 +425,12 @@
   }
 
   /* ---------- review ---------- */
-  var tabState = { review: null, tab: "verdict", sev: "all", agent: "all" };
+  var tabState = { review: null, tab: "verdict", sev: "all", agent: "all", focus: null, draft: "" };
+  var chatCache = {};
 
   function reviewView(id) {
     stopPolling();
-    if (tabState.review !== id) tabState = { review: id, tab: "verdict", sev: "all", agent: "all" };
+    if (tabState.review !== id) tabState = { review: id, tab: "verdict", sev: "all", agent: "all", focus: null, draft: "" };
     var projectCache = null;
 
     function load() {
@@ -574,7 +626,8 @@
         function show() {
           var defs = [
             ["verdict", "Verdict"],
-            ["findings", "Findings", (review.findings || []).length]
+            ["findings", "Findings", (review.findings || []).length],
+            ["ask", "Ask"]
           ];
           if (review.comparison) {
             defs.push(["comparison", "Comparison"]);
@@ -591,12 +644,18 @@
           var tabMap = {
             verdict: verdictTab,
             findings: findingsTab,
+            ask: askTab,
             comparison: comparisonTab,
             debate: debateTab,
             rfc: rfcTab
           };
           var body = tabMap[tabState.tab] || verdictTab;
           content.replaceChildren(body(review, p, show));
+          if (tabState.focus) {
+            var target = content.querySelector('[data-finding="' + tabState.focus + '"]');
+            tabState.focus = null;
+            if (target) { target.open = true; target.scrollIntoView({ block: "center" }); }
+          }
         }
 
         render([el("div", { class: "wrap" }, [header(review, p && p.name), tabs, content])]);
@@ -650,6 +709,19 @@
       return chip(counts[s] + " " + s, sevTone(s));
     });
 
+    var all = review.findings || [];
+    var resolved = all.filter(function (f) { return ["accepted", "rejected", "fixed"].indexOf(f.status) >= 0; }).length;
+    var bar = el("div", { class: "distbar", role: "img", "aria-label": "Findings by severity" }, SEVERITIES.filter(function (s) { return counts[s]; }).map(function (s) {
+      return el("span", { class: "dist dist-" + sevTone(s), style: "flex:" + counts[s], title: counts[s] + " " + s });
+    }));
+    var tiles = el("div", { class: "tiles" }, [
+      ["Score", rep.score + "/100"], ["Findings", String(all.length)],
+      ["Critical + high", String((counts.critical || 0) + (counts.high || 0))],
+      ["Resolved", resolved + "/" + all.length]
+    ].map(function (x) {
+      return el("div", { class: "stat" }, [el("div", { class: "stat-val", text: x[1] }), el("div", { class: "stat-label", text: x[0] })]);
+    }));
+
     return el("div", {}, [
       el("div", { class: "card verdict" }, [
         ring(rep.score, d.tone),
@@ -661,6 +733,8 @@
           sev.length ? el("div", { class: "sev-row" }, sev) : null
         ])
       ]),
+      tiles,
+      all.length ? el("div", { class: "card dist-card" }, [el("div", { class: "f-label", text: "Findings by severity" }), bar]) : null,
       el("div", { class: "cols" }, [
         listCard("Key risks", rep.key_risks || [], false),
         listCard("What to do", rep.recommendations || [], true)
@@ -861,12 +935,12 @@
     }
     renderComments();
 
-    return el("details", { class: "finding" }, [
+    return el("details", { class: "finding sev-" + sevTone(f.severity), "data-finding": String(f.id) }, [
       el("summary", {}, [
         el("span", { class: "dot dot-" + sevTone(f.severity) }),
         el("span", { class: "f-title", text: f.title }),
         statusBadge,
-        el("span", { class: "f-agent", text: agentShort(f.agent_name) + (f.category ? " · " + f.category : "") }),
+        el("span", { class: "f-agent" }, [el("i", { class: "agent-dot", style: "background:" + agentColor(f.agent_name) }), agentShort(f.agent_name) + (f.category ? " · " + f.category : "")]),
         el("span", { class: "chev" })
       ]),
       el("div", { class: "f-body" }, [
@@ -878,6 +952,14 @@
         el("div", {}, [el("div", { class: "f-label", text: "Suggested fix" }), el("p", { text: f.recommendation })]),
         f.tradeoffs ? el("div", {}, [el("div", { class: "f-label", text: "Trade-offs" }), el("p", { text: f.tradeoffs })]) : null,
         reasonNote,
+        el("div", {}, [el("button", {
+          class: "link-btn", type: "button", text: "Ask the assistant about this finding",
+          onclick: function () {
+            tabState.tab = "ask";
+            tabState.draft = "Explain this finding in simple words and tell me how to fix it: " + f.title;
+            redraw();
+          }
+        })]),
         actions,
         commentsWrap
       ])
@@ -911,6 +993,204 @@
         alert("Could not update finding status: " + err.message);
       });
     }
+  }
+
+
+  /* ---------- ask the assistant about a review ---------- */
+  var STARTERS = [
+    "What should I fix first?",
+    "Why did the review reach this verdict?",
+    "Which findings could I safely postpone?",
+    "Where did the agents disagree?",
+    "Give me a short action plan for my team"
+  ];
+
+  function chatInline(text, byId, redraw) {
+    var out = [];
+    String(text).split(/(\*\*[^*\n]+\*\*|\[#\d+\])/).forEach(function (part) {
+      if (!part) return;
+      var m = /^\[#(\d+)\]$/.exec(part);
+      if (m) {
+        var f = byId[m[1]];
+        if (!f) return;
+        var label = f.title.length > 42 ? f.title.slice(0, 41) + "…" : f.title;
+        out.push(el("button", {
+          class: "cite", type: "button", title: "Open this finding", text: label,
+          onclick: function () {
+            tabState.tab = "findings"; tabState.sev = "all"; tabState.agent = "all"; tabState.focus = f.id;
+            redraw();
+          }
+        }));
+      } else if (/^\*\*.+\*\*$/.test(part)) {
+        out.push(el("strong", { text: part.slice(2, -2) }));
+      } else {
+        out.push(part);
+      }
+    });
+    return out;
+  }
+
+  function chatRich(text, byId, redraw) {
+    var nodes = [];
+    text = String(text).replace(/\[\[\s*propose[^\]]*(\]\]?)?/gi, "");
+    String(text).split(/\n{2,}/).forEach(function (block) {
+      var list = null, para = [];
+      function flush() {
+        if (para.length) { nodes.push(el("p", {}, chatInline(para.join(" "), byId, redraw))); para = []; }
+      }
+      block.split("\n").filter(function (l) { return l.trim(); }).forEach(function (line) {
+        var li = /^\s*(?:[-*•]|\d+[.)])\s+(.*)$/.exec(line);
+        if (li) {
+          flush();
+          if (!list) { list = el("ul", {}); nodes.push(list); }
+          list.appendChild(el("li", {}, chatInline(li[1], byId, redraw)));
+        } else { list = null; para.push(line.trim()); }
+      });
+      flush();
+    });
+    return nodes;
+  }
+
+  function askTab(review, p, redraw) {
+    var id = review.id;
+    var byId = {};
+    (review.findings || []).forEach(function (f) { byId[f.id] = f; });
+    var busy = false;
+    var thread = el("div", { class: "chat-thread", "aria-live": "polite" });
+    var errP = el("p", { class: "form-error", role: "alert" });
+    var box = el("textarea", {
+      class: "chat-input", rows: "2", maxlength: "1500",
+      placeholder: "Ask anything about this review…", "aria-label": "Your question"
+    });
+    var send = el("button", { class: "btn btn-primary", type: "submit", text: "Ask" });
+    var form = el("form", { class: "chat-form" }, [box, send]);
+
+    function chatActions(m) {
+      var open = (m.actions || []).filter(function (a) { return byId[a.finding_id] && byId[a.finding_id].status !== a.status; });
+      if (!open.length) return null;
+      return el("div", { class: "proposals" }, open.map(function (a) {
+        var f = byId[a.finding_id];
+        var btn = el("button", { class: "btn btn-primary btn-sm", type: "button", text: "Apply" });
+        btn.addEventListener("click", function () {
+          var reason = a.reason;
+          if (a.status === "rejected" && !reason) {
+            reason = (prompt("A reason is required to reject this finding:") || "").trim();
+            if (!reason) return;
+          }
+          btn.disabled = true; errP.textContent = "";
+          api("/reviews/" + id + "/findings/" + f.id, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: a.status, reason: reason || null })
+          }).then(function (updated) {
+            f.status = updated.status; f.status_reason = updated.status_reason;
+            renderThread();
+          }).catch(function (err) {
+            btn.disabled = false;
+            if (!err.handled) errP.textContent = err.status === 403 ? "Your role can't change finding statuses." : err.message;
+          });
+        });
+        return el("div", { class: "proposal" }, [
+          el("div", { class: "proposal-text" }, [
+            el("span", { class: "f-label", text: "Suggested change" }),
+            el("div", {}, ["Mark ", el("strong", { text: f.title }), " as ", chip(pretty(a.status), statusTone(a.status))]),
+            a.reason ? el("div", { class: "muted", text: "Reason: " + a.reason }) : null
+          ]),
+          btn
+        ]);
+      }));
+    }
+
+    function renderThread() {
+      var msgs = chatCache[id];
+      var nodes = [];
+      if (!msgs) {
+        nodes.push(el("p", { class: "muted pulse", text: "Loading…" }));
+      } else if (!msgs.length && !busy) {
+        nodes.push(el("p", { class: "chat-intro", text:
+          "Ask about the findings, the verdict, the debate or the RFC. Answers come from this review only, so check anything important yourself." }));
+        nodes.push(el("div", { class: "starters" }, STARTERS.map(function (s) {
+          return el("button", { class: "starter", type: "button", text: s, onclick: function () { submit(s); } });
+        })));
+      }
+      (msgs || []).forEach(function (m) {
+        nodes.push(m.role === "user"
+          ? el("div", { class: "bubble bubble-me" }, [el("p", { text: m.content })])
+          : el("div", { class: "bot-row" }, [el("span", { class: "bot-avatar sm", "aria-hidden": "true", text: "✦" }),
+              el("div", { class: "bot-stack" }, [
+                el("div", { class: "bubble bubble-bot" }, chatRich(m.content, byId, redraw)),
+                chatActions(m)
+              ])]));
+      });
+      if (busy) nodes.push(el("div", { class: "bot-row" }, [el("span", { class: "bot-avatar sm", "aria-hidden": "true", text: "✦" }),
+        el("div", { class: "bubble bubble-bot" }, [el("span", { class: "typing", "aria-label": "Reading the review" }, [el("i"), el("i"), el("i")])])]));
+      if (msgs && msgs.length && !busy) {
+        nodes.push(el("button", {
+          class: "link-btn chat-clear", type: "button", text: "Clear conversation",
+          onclick: function () {
+            if (!confirm("Delete this conversation?")) return;
+            api("/reviews/" + id + "/chat", { method: "DELETE" }).then(function () {
+              chatCache[id] = []; renderThread();
+            }).catch(function (err) { if (!err.handled) errP.textContent = err.message; });
+          }
+        }));
+      }
+      thread.replaceChildren.apply(thread, nodes);
+    }
+
+    var frame = false;
+    function scheduleRender() {
+      if (frame) return;
+      frame = true;
+      requestAnimationFrame(function () { frame = false; renderThread(); form.scrollIntoView({ block: "nearest" }); });
+    }
+
+    function submit(question) {
+      var q = String(question || "").trim();
+      if (!q || busy || !chatCache[id]) return;
+      busy = true; send.disabled = true; errP.textContent = ""; box.value = "";
+      var list = chatCache[id];
+      list.push({ role: "user", content: q });
+      var live = null;
+      renderThread();
+      form.scrollIntoView({ block: "nearest" });
+      streamPost("/reviews/" + id + "/chat/stream", { message: q }, function (ev) {
+        if (ev.type !== "delta") return;
+        if (!live) { live = { role: "assistant", content: "" }; list.push(live); }
+        live.content += ev.text;
+        scheduleRender();
+      }).then(function (done) {
+        if (!done) throw new Error("The answer was cut off. Please ask again.");
+        if (live && list.indexOf(live) >= 0) list.splice(list.indexOf(live), 1);
+        list.pop(); // the temporary question
+        list.push(done.question, done.answer);
+      }).catch(function (err) {
+        if (live && list.indexOf(live) >= 0) list.splice(list.indexOf(live), 1);
+        list.pop();
+        if (!err.handled) { errP.textContent = err.message; box.value = q; }
+      }).then(function () {
+        busy = false; send.disabled = false; renderThread();
+        form.scrollIntoView({ block: "nearest" });
+      });
+    }
+
+    form.addEventListener("submit", function (e) { e.preventDefault(); submit(box.value); });
+    box.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(box.value); }
+    });
+
+    if (tabState.draft) { box.value = tabState.draft; tabState.draft = ""; setTimeout(function () { box.focus(); }, 0); }
+    renderThread();
+    if (!chatCache[id]) {
+      api("/reviews/" + id + "/chat").then(function (rows) { chatCache[id] = rows; renderThread(); })
+        .catch(function (err) { if (!err.handled) { chatCache[id] = []; errP.textContent = err.message; renderThread(); } });
+    }
+    return el("div", { class: "chat card" }, [
+      el("div", { class: "chat-head" }, [
+        el("span", { class: "bot-avatar", "aria-hidden": "true", text: "✦" }),
+        el("div", {}, [el("div", { class: "chat-title", text: "Review assistant" }), el("div", { class: "chat-sub", text: "Answers from this review's findings, debate and RFC" })])
+      ]),
+      thread, errP, form
+    ]);
   }
 
   /* ---------- workspace management ---------- */
@@ -1014,7 +1294,7 @@
       wrap.appendChild(el("div", { class: "list", style: rounds.length > 1 ? null : "" }, debates.filter(function (d) { return d.round === r; }).map(function (d) {
         var tone = { agree: "green", disagree: "red", refine: "blue" }[d.stance] || "gray";
         return el("div", { class: "msg" }, [
-          el("div", { class: "avatar", "aria-hidden": "true", text: agentShort(d.agent_name).charAt(0).toUpperCase() }),
+          el("div", { class: "avatar", "aria-hidden": "true", style: "background:" + agentColor(d.agent_name), text: agentShort(d.agent_name).charAt(0).toUpperCase() }),
           el("div", {}, [
             el("div", { class: "msg-head" }, [
               el("span", { text: agentShort(d.agent_name) }),
@@ -1031,7 +1311,7 @@
 
   /* ---------- RFC tab ---------- */
   function rfcTab(review, p) {
-    var secs = review.parsed_sections;
+    var secs = review.parsed_sections && review.parsed_sections.sections ? review.parsed_sections.sections : null;
     var keys = secs ? Object.keys(secs).filter(function (k) { return secs[k]; }) : [];
     var wrap = el("div");
     if (keys.length) {

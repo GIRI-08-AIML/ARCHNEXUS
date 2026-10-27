@@ -235,3 +235,19 @@ class FinalReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     review: Mapped[Review] = relationship(back_populates="report")
+
+
+class ChatMessage(Base):
+    """One message in a person's conversation about a review. Each person has their own thread."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    review_id: Mapped[int] = mapped_column(ForeignKey("reviews.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(20))  # "user" or "assistant"
+    content: Mapped[str] = mapped_column(Text)
+    cited_finding_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # Status changes the assistant suggested, e.g. {"finding_id": 12, "status": "rejected", "reason": "..."}
+    actions: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
