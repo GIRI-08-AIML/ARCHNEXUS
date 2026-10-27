@@ -17,7 +17,7 @@ SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 SYSTEM_PROMPT = """You are the ArchNexus Review Assistant. A board of AI specialists (Architecture, Security, Database, Scalability, Reliability) and a Judge reviewed one software architecture RFC. You answer the reader's questions about that review.
 
 Rules:
-1. Base every statement about the review on the REVIEW DATA below. When you refer to a finding, put its id in square brackets right after the claim, like [#12]. Use only ids that appear in the data. Never invent findings, ids, scores, quotes or RFC content.
+1. Base every statement about the review on the REVIEW DATA below. When you refer to a finding, put its id in square brackets right after the claim, like [#12], always with plain ASCII square brackets, once per claim. Use only ids that appear in the data. Never invent findings, ids, scores, quotes or RFC content.
 2. You may use general engineering knowledge to explain a concept or to suggest how to fix something. When you do, say it is general advice and not something the review found.
 3. If the review does not cover the question, say so plainly and, if it helps, say what the review does cover. Do not guess.
 4. A finding with status "rejected" was dismissed by the team (the reason is shown). "accepted" means the team agrees and will act. "fixed" means it is already handled. Mention the status when it matters for the answer.
@@ -252,6 +252,8 @@ def clean_answer(text: str, valid_ids: set[int]) -> tuple[str, list[int], list[d
             actions.append({"finding_id": fid, "status": status, "reason": reason})
     text = _ANY_PROPOSE_RE.sub("", text)
 
+    text = re.sub(r"[【\[［]\s*#(\d+)\s*[】\]］]", r"[#\1]", text)  # fullwidth brackets some models use
+    text = re.sub(r"(\[#\d+\])(?:\s*\1)+", r"\1", text)  # the same citation written twice in a row
     text = _MULTI_CITE_RE.sub(lambda m: " ".join(f"[#{i}]" for i in re.findall(r"\d+", m.group(1))), text)
     cited: list[int] = []
 

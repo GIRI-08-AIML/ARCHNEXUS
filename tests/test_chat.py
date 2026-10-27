@@ -202,3 +202,11 @@ def test_cloud_stream_text_waits_out_a_rate_limit_then_streams(monkeypatch):
     client = OpenAICompatibleClient(Settings(_env_file=None, llm_api_key="k", llm_provider="groq"))
     assert "".join(client.stream_text([{"role": "user", "content": "hi"}])) == "Hello"
     assert sleeps == [3.5]
+
+
+def test_odd_bracket_citations_are_normalised_and_deduplicated():
+    from app.chat import clean_answer
+
+    text, cited, _ = clean_answer("Shared DB [#2] 【#2】 and the saga 【#7】 and [#2][#2].", {2, 7})
+    assert text == "Shared DB [#2] and the saga [#7] and [#2]."
+    assert cited == [2, 7]

@@ -1033,6 +1033,7 @@
   function chatRich(text, byId, redraw) {
     var nodes = [];
     text = String(text).replace(/\[\[\s*propose[^\]]*(\]\]?)?/gi, "");
+    text = text.replace(/[【［]\s*#(\d+)\s*[】］]/g, "[#$1]").replace(/(\[#\d+\])(\s*\1)+/g, "$1");
     String(text).split(/\n{2,}/).forEach(function (block) {
       var list = null, para = [];
       function flush() {
