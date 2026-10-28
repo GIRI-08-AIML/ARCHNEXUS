@@ -183,14 +183,132 @@
   }
 
   /* ---------- sign in / register ---------- */
-  function renderUserBox() {
-    var box = document.getElementById("user");
-    if (!box) return;
-    if (!session) { box.replaceChildren(); return; }
-    var label = session.user.company ? session.user.name + " \u00b7 " + session.user.company : session.user.name;
-    box.replaceChildren(
-      el("span", { class: "user-name", text: label }),
-      el("button", { class: "link-btn", type: "button", text: "Sign out", onclick: signOut })
+  /* ---------- icons, theme and app shell (sidebar + top bar) ---------- */
+  var ICONS = {
+    dashboard: "M3 3h7v9H3z M14 3h7v5h-7z M14 12h7v9h-7z M3 16h7v5H3z",
+    plus: "M12 5v14 M5 12h14",
+    list: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01",
+    users: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75",
+    code: "M16 18l6-6-6-6 M8 6l-6 6 6 6",
+    logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9",
+    search: "M21 21l-4.3-4.3 M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16",
+    sun: "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10 M12 1v2 M12 21v2 M4.2 4.2l1.4 1.4 M18.4 18.4l1.4 1.4 M1 12h2 M21 12h2 M4.2 19.8l1.4-1.4 M18.4 5.6l1.4-1.4",
+    moon: "M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z",
+    menu: "M3 6h18 M3 12h18 M3 18h18",
+    chat: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+    check: "M22 11.1V12a10 10 0 1 1-5.9-9.1 M22 4L12 14l-3-3",
+    star: "M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.9L12 17.8 5.8 21.1 7 14.2 2 9.3l6.9-1z",
+    alert: "M12 9v4 M12 17h.01 M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
+    clock: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20 M12 6v6l4 2",
+    file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8"
+  };
+  function icon(name) {
+    var s = svg("svg", { "class": "ic", viewBox: "0 0 24 24", "aria-hidden": "true" });
+    s.appendChild(svg("path", { d: ICONS[name] || "" }));
+    return s;
+  }
+
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+  }
+  function setTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    try { localStorage.setItem("archnexus.theme", t); } catch (e) { /* storage blocked: theme lasts until reload */ }
+    [].forEach.call(document.querySelectorAll(".theme-toggle button"), function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-theme") === t));
+    });
+  }
+
+  var sideEl = document.getElementById("side");
+  var topEl = document.getElementById("topbar");
+  var scrim = document.getElementById("scrim");
+
+  function setDrawer(open) {
+    document.body.classList.toggle("drawer-open", !!open);
+    if (scrim) scrim.hidden = !open;
+  }
+  if (scrim) scrim.addEventListener("click", function () { setDrawer(false); });
+
+  function initials(name) {
+    var parts = String(name || "?").trim().split(/\s+/);
+    return ((parts[0] || "?").charAt(0) + (parts.length > 1 ? parts[parts.length - 1].charAt(0) : "")).toUpperCase();
+  }
+
+  function activeNav(path) {
+    if (path === "/" || path === "") return "/";
+    if (path === "/new") return "/new";
+    if (path === "/workspace") return "/workspace";
+    if (path === "/history" || path.indexOf("/review/") === 0) return "/history";
+    return "";
+  }
+
+  function navItem(href, ic, label, active, external) {
+    var a = el("a", {
+      class: "nav-item" + (active ? " active" : ""), href: href,
+      "aria-current": active ? "page" : null,
+      target: external ? "_blank" : null, rel: external ? "noopener" : null,
+      onclick: function () { setDrawer(false); }
+    }, [icon(ic), label]);
+    return a;
+  }
+
+  function renderUserBox(path, query) {
+    if (path === undefined) path = (location.hash.replace(/^#/, "").split("?")[0]) || "/";
+    document.body.classList.toggle("guest", !session);
+    var theme = currentTheme();
+    var toggle = el("div", { class: "theme-toggle", role: "group", "aria-label": "Colour theme" }, [
+      el("button", { type: "button", "data-theme": "light", "aria-label": "Light theme", title: "Light", "aria-pressed": String(theme === "light"), onclick: function () { setTheme("light"); } }, [icon("sun")]),
+      el("button", { type: "button", "data-theme": "dark", "aria-label": "Dark theme", title: "Dark", "aria-pressed": String(theme === "dark"), onclick: function () { setTheme("dark"); } }, [icon("moon")])
+    ]);
+
+    if (!session) {
+      sideEl.replaceChildren();
+      topEl.replaceChildren(
+        el("a", { class: "brand", href: "#/login" }, ["ArchNexus"]),
+        el("span", { class: "top-spacer" }),
+        toggle
+      );
+      return;
+    }
+
+    var act = activeNav(path);
+    sideEl.replaceChildren(
+      el("a", { class: "brand", href: "#/", onclick: function () { setDrawer(false); } }, ["ArchNexus"]),
+      el("h4", { text: "Main menu" }),
+      navItem("#/", "dashboard", "Dashboard", act === "/"),
+      navItem("#/new", "plus", "New review", act === "/new"),
+      navItem("#/history", "list", "All reviews", act === "/history"),
+      el("h4", { text: "Team and tools" }),
+      navItem("#/workspace", "users", "Workspace", act === "/workspace"),
+      navItem("/docs", "code", "API docs", false, true),
+      el("div", { class: "side-spacer" }),
+      el("div", { class: "side-card" }, [
+        el("div", { class: "orb" }, [icon("chat")]),
+        el("strong", { text: "Ask the assistant" }),
+        el("p", { text: "Open a finished review and use its Ask tab to question any finding." }),
+        el("a", { class: "btn btn-primary", href: "#/history", text: "Browse reviews", onclick: function () { setDrawer(false); } })
+      ]),
+      el("button", { class: "nav-item", type: "button", onclick: function () { setDrawer(false); signOut(); } }, [icon("logout"), "Sign out"])
+    );
+
+    var q = el("input", { type: "search", placeholder: "Search reviews…", "aria-label": "Search reviews", value: query || "" });
+    var searchForm = el("form", { class: "top-search", role: "search" }, [icon("search"), q]);
+    searchForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var v = q.value.trim();
+      location.hash = "#/history" + (v ? "?q=" + encodeURIComponent(v) : "");
+    });
+
+    var user = session.user || {};
+    topEl.replaceChildren(
+      el("button", { class: "menu-btn", type: "button", "aria-label": "Open menu", onclick: function () { setDrawer(true); } }, [icon("menu")]),
+      searchForm,
+      el("span", { class: "top-spacer" }),
+      toggle,
+      el("div", { class: "user-chip", title: user.email || "" }, [
+        el("span", { class: "initials", text: initials(user.name), "aria-hidden": "true" }),
+        el("div", { class: "who" }, [el("b", { text: user.name || "Signed in" }), el("span", { text: user.company || "Review board" })])
+      ])
     );
   }
 
@@ -265,7 +383,196 @@
   }
 
   /* ---------- home ---------- */
-  function homeView() {
+  /* ---------- dashboard ---------- */
+  function boardStack() {
+    return el("div", { class: "board-stack" }, SPECIALISTS.map(function (n) {
+      return el("span", { class: "avatar", title: n + " Agent", style: "background:" + agentColor(n), text: n.charAt(0) });
+    }).concat([el("small", { text: "5 specialists and a judge, ready to review" })]));
+  }
+
+  function kpi(tone, ic, label, value, sub) {
+    return el("div", { class: "kpi" }, [
+      el("div", { class: "kpi-top" }, [el("span", { class: "kpi-ico " + tone }, [icon(ic)]), el("span", { class: "kpi-label", text: label })]),
+      el("div", { class: "kpi-val", text: String(value) }),
+      el("div", { class: "kpi-sub", text: sub })
+    ]);
+  }
+
+  function reviewBlurb(r) {
+    if (r.status === "failed") return "This review could not finish. Open it to see why.";
+    if (r.status === "pending") return "Queued. The specialists will start in a moment.";
+    if (r.status === "running") return "The specialists are reading the RFC and debating.";
+    return r.decision ? decisionInfo(r.decision).line : "Completed.";
+  }
+
+  function miniCard(r) {
+    var total = r.total_findings || 0;
+    var pct = total ? Math.round((r.resolved_findings || 0) * 100 / total) : 0;
+    return el("a", { class: "mini", href: "#/review/" + r.id }, [
+      el("div", { class: "chips" }, [statusChip(r), chip("Review " + r.id, "gray")]),
+      el("h3", { text: r.project_name }),
+      el("p", { text: reviewBlurb(r) }),
+      el("div", { class: "prog" + (pct === 100 ? " green" : ""), role: "img", "aria-label": pct + " percent of findings resolved" }, [el("i", { style: "width:" + pct + "%" })]),
+      el("div", { class: "prog-note", text: total ? pct + "% resolved (" + r.resolved_findings + " of " + total + ")" : "No findings yet" }),
+      el("div", { class: "mini-foot" }, [
+        el("span", {}, ["Score ", el("b", { text: r.score !== null && r.score !== undefined ? String(r.score) : "–" })]),
+        el("span", { text: when(r.created_at) })
+      ])
+    ]);
+  }
+
+  function scoreChart(rows) {
+    var scored = rows.filter(function (r) { return r.status === "completed" && r.score !== null && r.score !== undefined; })
+      .slice(0, 12).reverse();
+    if (!scored.length) return el("p", { class: "empty", text: "Finish a review and its score will show up here." });
+    var cols = scored.map(function (r) {
+      var filled = Math.round(r.score / 10);
+      var tone = decisionInfo(r.decision).tone;
+      var dots = [];
+      for (var i = 0; i < 10; i++) dots.push(el("span", { class: "chart-dot" + (i < filled ? " on " + tone : "") }));
+      return el("a", { class: "chart-col", href: "#/review/" + r.id, title: r.project_name + ": " + r.score + "/100, " + decisionInfo(r.decision).label }, [
+        el("div", { class: "chart-dots" }, dots),
+        el("span", { class: "chart-x", text: "#" + r.id })
+      ]);
+    });
+    return el("div", {}, [
+      el("div", { class: "chart", role: "img", "aria-label": "Score of each recent review out of 100" }, [
+        el("div", { class: "chart-y" }, ["100", "80", "60", "40", "20"].map(function (t) { return el("span", { text: t }); })),
+        el("div", { class: "chart-cols" }, cols)
+      ])
+    ]);
+  }
+
+  function boardPanel(agents) {
+    var list = (agents && agents.length ? agents : SPECIALISTS.map(function (n) { return { name: n + " Agent", role: "specialist" }; }).concat([{ name: "Judge Agent", role: "judge" }]));
+    return el("div", { class: "board-list" }, list.map(function (a) {
+      return el("div", { class: "agent-row" }, [
+        el("span", { class: "avatar", style: "background:" + agentColor(a.name), text: agentShort(a.name).charAt(0).toUpperCase() }),
+        el("div", {}, [el("b", { text: a.name }), el("span", { text: pretty(a.role) })]),
+        el("span", { class: "ready", text: "Ready" })
+      ]);
+    }));
+  }
+
+  function reviewTable(rows) {
+    var body = el("tbody");
+    var search = el("input", { type: "search", placeholder: "Search by project…", "aria-label": "Search recent reviews" });
+    function draw() {
+      var q = search.value.trim().toLowerCase();
+      var list = rows.filter(function (r) { return !q || String(r.project_name).toLowerCase().indexOf(q) >= 0; }).slice(0, 8);
+      if (!list.length) {
+        body.replaceChildren(el("tr", {}, [el("td", { colspan: "7", class: "empty", text: "No reviews match your search." })]));
+        return;
+      }
+      body.replaceChildren.apply(body, list.map(function (r) {
+        var tr = el("tr", { tabindex: "0", onclick: function () { location.hash = "#/review/" + r.id; } }, [
+          el("td", {}, [el("div", { class: "pname", text: r.project_name })]),
+          el("td", { text: "#" + r.id }),
+          el("td", { text: when(r.created_at) }),
+          el("td", {}, [statusChip(r)]),
+          el("td", { class: "score", text: r.score !== null && r.score !== undefined ? String(r.score) : "–" }),
+          el("td", { text: r.total_findings ? r.resolved_findings + " / " + r.total_findings : "–" }),
+          el("td", {}, [el("a", { class: "open-link", href: "#/review/" + r.id, text: "Open" })])
+        ]);
+        tr.addEventListener("keydown", function (e) { if (e.key === "Enter") location.hash = "#/review/" + r.id; });
+        return tr;
+      }));
+    }
+    search.addEventListener("input", draw);
+    draw();
+    return el("div", { class: "panel" }, [
+      el("div", { class: "panel-head" }, [
+        el("h2", { text: "Recent reviews" }),
+        el("div", { class: "tbl-search" }, [icon("search"), search])
+      ]),
+      el("div", { class: "tbl-wrap" }, [
+        el("table", { class: "tbl" }, [
+          el("thead", {}, [el("tr", {}, ["Project", "Review", "Date", "Decision", "Score", "Resolved", ""].map(function (h) { return el("th", { text: h }); }))]),
+          body
+        ])
+      ])
+    ]);
+  }
+
+  function dashBody(rows, agents) {
+    if (!rows.length) {
+      return el("div", { class: "panel dash-empty" }, [
+        el("h2", { text: "Your first review starts here" }),
+        el("p", { text: "Paste or upload an RFC and five specialist agents will review it, debate it, and give you a verdict." }),
+        el("a", { class: "btn btn-primary", href: "#/new" }, [icon("plus"), "Start a review"])
+      ]);
+    }
+    var weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
+    var thisWeek = rows.filter(function (r) { return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(r.created_at) ? r.created_at : r.created_at + "Z").getTime() >= weekAgo; }).length;
+    var scored = rows.filter(function (r) { return r.score !== null && r.score !== undefined; });
+    var avg = scored.length ? Math.round(scored.reduce(function (a, r) { return a + r.score; }, 0) / scored.length) : null;
+    var totalF = rows.reduce(function (a, r) { return a + (r.total_findings || 0); }, 0);
+    var resolvedF = rows.reduce(function (a, r) { return a + (r.resolved_findings || 0); }, 0);
+    var running = rows.filter(function (r) { return r.status === "pending" || r.status === "running"; }).length;
+    var failed = rows.filter(function (r) { return r.status === "failed"; }).length;
+    var more = rows.length >= 100 ? "+" : "";
+
+    var legend = el("div", { class: "legend" }, [
+      el("span", {}, [el("i", { style: "background:var(--green)" }), "Approved"]),
+      el("span", {}, [el("i", { style: "background:var(--orange)" }), "Approved with changes"]),
+      el("span", {}, [el("i", { style: "background:var(--red)" }), "Rejected"])
+    ]);
+
+    return el("div", {}, [
+      el("div", { class: "dash-grid" }, [
+        el("div", { class: "stat-grid" }, [
+          kpi("", "file", "Total reviews", rows.length + more, thisWeek + " in the last 7 days"),
+          kpi("violet", "star", "Average score", avg === null ? "–" : avg, scored.length ? "across " + scored.length + " scored review" + (scored.length === 1 ? "" : "s") : "no scores yet"),
+          kpi("orange", "alert", "Open findings", Math.max(0, totalF - resolvedF), resolvedF + " of " + totalF + " resolved"),
+          kpi("green", "clock", "In progress", running, failed ? failed + " failed" : "nothing has failed")
+        ]),
+        el("div", { class: "panel" }, [
+          el("div", { class: "panel-head" }, [el("h2", { text: "Latest reviews" }), el("a", { href: "#/history", text: "See all" })]),
+          el("div", { class: "mini-grid" }, rows.slice(0, 2).map(miniCard))
+        ])
+      ]),
+      el("div", { class: "two-col stack-gap" }, [
+        el("div", { class: "panel grow" }, [
+          el("div", { class: "panel-head" }, [el("h2", { text: "Review scores" }), legend]),
+          el("div", { class: "chart-wrap" }, [scoreChart(rows)])
+        ]),
+        el("div", { class: "panel" }, [
+          el("div", { class: "panel-head" }, [el("h2", { text: "Review board" })]),
+          boardPanel(agents)
+        ])
+      ]),
+      el("div", { class: "stack-gap" }, [reviewTable(rows)])
+    ]);
+  }
+
+  function dashboardView() {
+    stopPolling();
+    var holder = el("div", {}, [el("p", { class: "empty pulse", text: "Loading your dashboard…" })]);
+    var first = session && session.user && session.user.name ? String(session.user.name).split(/\s+/)[0] : "there";
+    render([el("div", { class: "wrap" }, [
+      el("div", { class: "dash-head" }, [
+        el("div", {}, [
+          el("div", { class: "dash-date", text: new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" }) }),
+          el("h1", { text: "Welcome back, " + first }),
+          boardStack()
+        ]),
+        el("div", { class: "dash-actions" }, [
+          el("a", { class: "btn btn-primary", href: "#/new" }, [icon("plus"), "New review"]),
+          el("a", { class: "btn btn-outline", href: "#/history" }, [icon("list"), "All reviews"])
+        ])
+      ]),
+      holder
+    ])]);
+    Promise.all([api("/reviews?limit=100"), api("/agents").catch(function () { return []; })]).then(function (res) {
+      holder.replaceChildren(dashBody(res[0], res[1]));
+    }).catch(function (err) {
+      if (err.handled) return;
+      if (err.network) setBanner(err.message);
+      holder.replaceChildren(el("p", { class: "empty", text: err.message }));
+    });
+  }
+
+  function newReviewView() {
     stopPolling();
     var nameInput = el("input", { id: "name", type: "text", maxlength: "200", placeholder: "Order Service Redesign", required: true });
     var rfcInput = el("textarea", { id: "rfc", placeholder: "Paste your RFC or architecture proposal here (Markdown or plain text).", required: true });
@@ -407,17 +714,27 @@
   }
 
   /* ---------- history ---------- */
-  function historyView() {
+  function historyView(query) {
     stopPolling();
-    var holder = el("div", {}, [el("p", { class: "empty pulse", text: "Loading…" })]);
+    var q = "";
+    String(query || "").split("&").forEach(function (kv) {
+      var i = kv.indexOf("=");
+      if (i > 0 && kv.slice(0, i) === "q") { try { q = decodeURIComponent(kv.slice(i + 1).replace(/\+/g, " ")); } catch (e) { q = kv.slice(i + 1); } }
+    });
+    var holder = el("div", {}, [el("p", { class: "empty pulse", text: "Loading\u2026" })]);
+    var sub = el("p", { class: "muted" });
     render([el("div", { class: "wrap" }, [
-      el("section", { class: "hero" }, [el("h1", { text: "All reviews" })]),
+      el("section", { class: "hero" }, [el("h1", { text: "All reviews" }), sub]),
       holder
     ])]);
     api("/reviews?limit=100").then(function (rows) {
-      holder.replaceChildren(rows.length
-        ? reviewList(rows)
-        : el("p", { class: "empty" }, ["No reviews yet. ", el("a", { href: "#/", text: "Start one" }), "."]));
+      var shown = q ? rows.filter(function (r) { return String(r.project_name).toLowerCase().indexOf(q.toLowerCase()) >= 0; }) : rows;
+      if (q) {
+        sub.replaceChildren(shown.length + " result" + (shown.length === 1 ? "" : "s") + " for \u201c" + q + "\u201d. ", el("a", { href: "#/history", text: "Clear search" }));
+      }
+      holder.replaceChildren(shown.length
+        ? reviewList(shown)
+        : el("p", { class: "empty" }, [q ? "No reviews match your search." : "No reviews yet. ", el("a", { href: "#/new", text: "Start one" }), "."]));
     }).catch(function (err) {
       if (err.handled) return;
       holder.replaceChildren(el("p", { class: "empty", text: err.message }));
@@ -504,7 +821,7 @@
               }
             }) : null,
             rereviewBtn,
-            el("a", { class: "btn btn-quiet", href: "#/", text: "New project" })
+            el("a", { class: "btn btn-quiet", href: "#/new", text: "New project" })
           ])
         ])
       ]);
@@ -612,7 +929,7 @@
             el("h2", { text: "This review didn't finish" }),
             el("p", { class: "muted", text: review.error || "Something went wrong while the agents were working." }),
             el("p", { class: "muted", text: "Check that Ollama is running and the model is installed, then start a new review." }),
-            el("a", { class: "btn btn-primary", href: "#/", text: "Start a new review" })
+            el("a", { class: "btn btn-primary", href: "#/new", text: "Start a new review" })
           ])
         ])]);
       });
@@ -1330,25 +1647,27 @@
 
   /* ---------- router ---------- */
   function route() {
-    var h = location.hash.replace(/^#/, "") || "/";
+    var raw = location.hash.replace(/^#/, "") || "/";
+    var qi = raw.indexOf("?");
+    var h = qi < 0 ? raw : raw.slice(0, qi);
+    var query = qi < 0 ? "" : raw.slice(qi + 1);
     var m = h.match(/^\/review\/(\d+)$/);
     window.scrollTo(0, 0);
+    setDrawer(false);
     var isAuthPage = h === "/login" || h === "/register";
     if (!session && !isAuthPage) { location.hash = "#/login"; return; }
     if (session && isAuthPage) { location.hash = "#/"; return; }
-    setNavVisible(!!session);
+    var q = "";
+    if (h === "/history") query.split("&").forEach(function (kv) { if (kv.indexOf("q=") === 0) { try { q = decodeURIComponent(kv.slice(2).replace(/\+/g, " ")); } catch (e) { q = kv.slice(2); } } });
+    renderUserBox(h, q);
     if (h === "/login") authView("login");
     else if (h === "/register") authView("register");
     else if (m) reviewView(parseInt(m[1], 10));
-    else if (h === "/history") historyView();
+    else if (h === "/history") historyView(query);
     else if (h === "/workspace") workspaceView();
-    else homeView();
+    else if (h === "/new") newReviewView();
+    else dashboardView();
     app.focus({ preventScroll: true });
-  }
-
-  function setNavVisible(on) {
-    var links = document.getElementById("nav-links");
-    if (links) links.hidden = !on;
   }
 
   renderUserBox();
