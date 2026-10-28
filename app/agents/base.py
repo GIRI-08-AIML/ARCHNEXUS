@@ -52,6 +52,8 @@ Report 3 to 6 findings, most severe first. Stay within your focus areas.
 Every finding must include a verbatim 'quote' directly from the RFC text: the sentence that shows the problem.
 Read the whole RFC before you report something as missing. If the RFC already states a safeguard for a concern, do not report that concern.
 Only report real weaknesses. Fewer, correct findings are better than many doubtful ones.
+Go through every "Always check" item in your focus areas one by one. If the RFC is weak or silent on one of them, report it, and report it even if other reviewers are likely to find it too. A serious problem in one of those items takes priority over a minor one, so it must not be left out to stay within the 6-finding limit.
+The quote must be about the same topic as the finding. If the RFC says nothing about the topic, quote the sentence about the component that lacks it.
 
 @@SEVERITY_GUIDE@@"""
 ANALYSIS_FORMAT = ANALYSIS_FORMAT.replace("@@SEVERITY_GUIDE@@", SEVERITY_GUIDE)
