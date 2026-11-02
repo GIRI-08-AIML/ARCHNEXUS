@@ -6,6 +6,7 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /health
+    autoDeploy: false          # GitHub Actions deploys after the tests pass (see .github/workflows/ci-cd.yml)
     envVars:
       - key: DATABASE_URL
         sync: false            # paste your Neon connection string
